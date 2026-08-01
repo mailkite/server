@@ -1,0 +1,46 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Conformance + admin suites (zero-dep — no install)
+        run: npm test
+        working-directory: backend-local
+      - name: Install IMAP edge deps
+        run: npm ci --no-audit --no-fund
+        working-directory: imap
+      - name: End-to-end (ingest → backend → imap-core daemon → TLS IMAP client)
+        run: node scripts/e2e-imap.mjs
+
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui
+
+  mta-submit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --no-audit --no-fund
+        working-directory: mta-submit
+      - run: npm test
+        working-directory: mta-submit

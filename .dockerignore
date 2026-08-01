@@ -1,0 +1,8 @@
+.git
+**/node_modules
+**/data
+ui/dist
+ui/tsconfig.tsbuildinfo
+imap/config/tls
+mta-submit/config/dkim
+**/*.log

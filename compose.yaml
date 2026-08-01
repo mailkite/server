@@ -1,0 +1,46 @@
+# MailKite Server — docker compose.
+#
+#   cp .env.example .env   # set HMAC_SECRET
+#   docker compose up -d               # backend + UI on :8787
+#   docker compose --profile edges up  # + the Haraka MX edge on :25
+#
+# The backend (API + web console) is the default service. The SMTP/IMAP edges are
+# profile-gated: they need privileged ports (25/587/993), public DNS, PTR records, and
+# real TLS material — see docs/self-hosting.md before enabling them.
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend-local/Dockerfile
+    ports:
+      - "8787:8787"
+    environment:
+      # Shared edge<->backend secret. Generate one: openssl rand -hex 32
+      HMAC_SECRET: ${HMAC_SECRET:?set HMAC_SECRET in .env}
+    volumes:
+      - mail-data:/data
+    restart: unless-stopped
+
+  # --- SMTP MX edge (inbound) — enable with: --profile edges ----------------------
+  # Requires: port 25 reachable from the internet, MX + PTR DNS records.
+  mta:
+    profiles: [edges]
+    build: ./mta
+    ports:
+      - "25:25"
+    environment:
+      MAILKITE_API_URL: http://backend:8787
+      MAILKITE_INGEST_URL: http://backend:8787/api/ingest
+      MAILKITE_HMAC_SECRET: ${HMAC_SECRET:?set HMAC_SECRET in .env}
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # --- IMAP edge -------------------------------------------------------------------
+  # Not composed yet: imap/ has no Dockerfile and requires real TLS PEMs mounted at
+  # config/tls/ (IMAPS is implicit TLS — there is no plaintext mode to demo). Run it on
+  # the host per docs/self-hosting.md, pointing MAILKITE_API_URL at this backend.
+
+volumes:
+  mail-data:

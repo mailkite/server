@@ -31,8 +31,16 @@ full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP cl
 
 ## Self-hosting
 
-See [`docs/self-hosting.md`](docs/self-hosting.md) — DNS records, TLS provisioning, and
-systemd units. Short version: one VPS, three daemons, your backend URL in one env var.
+**Runs on any Node ≥ 22.5 host** — VPS (systemd), Docker, Fly.io, Railway. Serverless
+(Workers/Vercel) is intentionally out of scope: those runtimes can't hold SQLite state or
+raw-TCP mail ports, and the hosted backend for that style is MailKite Cloud.
+
+- Quick start: `docker compose up -d` → backend + web console on `:8787`
+  ([`compose.yaml`](compose.yaml); `--profile edges` adds the MX edge)
+- Hosted: [`deploy/fly.md`](deploy/fly.md) · [`deploy/railway.md`](deploy/railway.md)
+- Bare VPS (full mail stack incl. IMAP/submission): [`docs/self-hosting.md`](docs/self-hosting.md)
+  — DNS records, TLS provisioning, and systemd units. Short version: one VPS, three
+  daemons, your backend URL in one env var.
 
 Don't want to run mail infrastructure? [MailKite Cloud](https://mailkite.dev) is the hosted
 backend + dashboard, with deliverability, retention, and support handled for you.

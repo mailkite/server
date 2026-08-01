@@ -1,0 +1,36 @@
+# Fly.io config for the MailKite Server backend (API + web console).
+# This is NOT mta/fly.toml (the SMTP MX edge) — this app serves HTTP only.
+#
+#   fly launch --no-deploy -c deploy/fly.toml   # run from the repo root
+#   fly volumes create mail_data -s 1
+#   fly secrets set HMAC_SECRET=$(openssl rand -hex 32)
+#   fly deploy -c deploy/fly.toml
+#
+# SQLite = single writer: keep exactly ONE machine and never scale this app out.
+
+app = "mailkite-server-backend"   # pick your own app name
+primary_region = "iad"
+
+[build]
+  dockerfile = "backend-local/Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8787"
+  DATA_DIR = "/data"
+
+[mounts]
+  source = "mail_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8787
+  force_https = true
+  # One always-on machine — SQLite state lives on the volume attached to it.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
