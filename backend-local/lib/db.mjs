@@ -166,6 +166,29 @@ export class Store {
     return uid;
   }
 
+  // Single-tenant convenience for the admin API / UI: one implicit account.
+  defaultUser() { return this.addUser('default'); }
+
+  listPaged(userId, mailbox, { limit = 50, beforeUid = null } = {}) {
+    const rows = beforeUid
+      ? this.db.prepare(
+          `SELECT uid, flags, internaldate, from_addr, to_addr, subject, size
+             FROM messages WHERE user_id = ? AND mailbox = ? AND uid < ?
+             ORDER BY uid DESC LIMIT ?`).all(userId, mailbox, beforeUid, limit)
+      : this.db.prepare(
+          `SELECT uid, flags, internaldate, from_addr, to_addr, subject, size
+             FROM messages WHERE user_id = ? AND mailbox = ?
+             ORDER BY uid DESC LIMIT ?`).all(userId, mailbox, limit);
+    return rows;
+  }
+  apiKeys(userId) {
+    return this.db.prepare('SELECT key FROM api_keys WHERE user_id = ?').all(userId).map((r) => r.key);
+  }
+  appPasswordUsers(userId) {
+    return this.db.prepare('SELECT DISTINCT username FROM app_passwords WHERE user_id = ?')
+      .all(userId).map((r) => r.username);
+  }
+
   status(userId, mailbox) {
     const box = this.mailbox(userId, mailbox);
     const t = this.db.prepare('SELECT COUNT(*) c FROM messages WHERE user_id = ? AND mailbox = ?')

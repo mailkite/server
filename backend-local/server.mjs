@@ -158,9 +158,97 @@ const routes = {
   },
 };
 
+// ---- admin API (drives ui/ via the `local` provider driver) -------------------
+// Same HMAC bearer as the edges. Single-tenant: everything belongs to the implicit
+// 'default' account (multi-user provisioning stays on the CLI).
+
+Object.assign(routes, {
+  'GET /api/admin/overview': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const u = store.defaultUser();
+    return json(res, 200, {
+      domains: store.domains().length,
+      inbox: store.status(u, 'INBOX'),
+      sent: store.status(u, 'Sent'),
+      capabilities: { inbound: true, imap: true, outboundLocal: true, outboundInternet: false, webhooks: false, routes: false },
+    });
+  },
+  'GET /api/admin/domains': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, { domains: store.domains() });
+  },
+  'POST /api/admin/domains': async (req, res, raw) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const { domain } = JSON.parse(raw.toString() || '{}');
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain || '')) return json(res, 400, { error: 'invalid domain', code: 'bad_domain' });
+    store.addDomain(domain, store.defaultUser());
+    return json(res, 200, { ok: true, domain: domain.toLowerCase() });
+  },
+  'GET /api/admin/credentials': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const u = store.defaultUser();
+    return json(res, 200, { apiKeys: store.apiKeys(u), appPasswords: store.appPasswordUsers(u) });
+  },
+  'POST /api/admin/keys': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, { key: store.addApiKey(store.defaultUser()) });
+  },
+  'POST /api/admin/app-passwords': async (req, res, raw) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const { username } = JSON.parse(raw.toString() || '{}');
+    const domain = (username || '').split('@')[1] || '';
+    if (!store.domains().includes(domain.toLowerCase())) {
+      return json(res, 400, { error: `domain not hosted here: ${domain || '(none)'}`, code: 'bad_domain' });
+    }
+    return json(res, 200, { username, password: store.addAppPassword(username, store.defaultUser()) });
+  },
+  'GET /api/admin/messages': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    const mailbox = q.get('mailbox') === 'Sent' ? 'Sent' : 'INBOX';
+    const limit = Math.min(Number(q.get('limit')) || 50, 200);
+    const beforeUid = q.get('before') ? Number(q.get('before')) : null;
+    const u = store.defaultUser();
+    const messages = store.listPaged(u, mailbox, { limit, beforeUid });
+    return json(res, 200, { messages, nextBefore: messages.length === limit ? messages[messages.length - 1].uid : null });
+  },
+  'GET /api/admin/raw': async (req, res) => {
+    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    const bytes = store.raw(store.defaultUser(), q.get('mailbox') === 'Sent' ? 'Sent' : 'INBOX', Number(q.get('uid')));
+    if (!bytes) return json(res, 404, { error: 'raw unavailable', code: 'no_raw' });
+    res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+    return res.end(bytes);
+  },
+});
+
+// ---- static UI ----------------------------------------------------------------
+// Serves ui/dist when present (built SPA); the UI calls the admin API same-origin.
+import { readFileSync as readFs, existsSync as existsFs } from 'node:fs';
+import { join as joinPath, normalize } from 'node:path';
+const UI_DIR = process.env.UI_DIR || new URL('../ui/dist', import.meta.url).pathname;
+const MIME = { html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', woff2: 'font/woff2', json: 'application/json' };
+function serveUi(req, res) {
+  if (req.method !== 'GET' || !existsFs(UI_DIR)) return false;
+  const pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  const safe = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
+  let file = joinPath(UI_DIR, safe === '/' ? 'index.html' : safe);
+  if (!file.startsWith(UI_DIR)) return false;
+  if (!existsFs(file)) file = joinPath(UI_DIR, 'index.html'); // SPA fallback
+  try {
+    const body = readFs(file);
+    res.writeHead(200, { 'content-type': MIME[file.split('.').pop()] || 'application/octet-stream' });
+    res.end(body);
+    return true;
+  } catch { return false; }
+}
+
 const server = createServer(async (req, res) => {
   const handler = routes[`${req.method} ${new URL(req.url, 'http://x').pathname}`];
-  if (!handler) return json(res, 404, { error: 'not found' });
+  if (!handler) {
+    if (serveUi(req, res)) return;
+    return json(res, 404, { error: 'not found' });
+  }
   try {
     const raw = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req);
     await handler(req, res, raw);
