@@ -1,0 +1,77 @@
+// App root: Connect gate + a minimal hash router (#/domains, #/messages,
+// #/credentials, #/webhooks). Deviation from the cloud dashboard's TanStack
+// Router, noted in the README: four flat screens don't earn a route tree; the
+// provider seam keeps screens portable if that changes.
+
+import { Component, useEffect, useState, type ReactNode } from "react"
+import { AlertTriangle, RefreshCw } from "lucide-react"
+import { AppShell, type NavKey } from "@/components/app-shell"
+import { Button } from "@/components/ui/button"
+import { useConnection } from "@/providers/context"
+import { ConnectScreen } from "@/screens/connect"
+import { DomainsScreen } from "@/screens/domains"
+import { MessagesScreen } from "@/screens/messages"
+import { CredentialsScreen } from "@/screens/credentials"
+import { WebhooksScreen } from "@/screens/webhooks"
+
+const KEYS: NavKey[] = ["domains", "messages", "credentials", "webhooks"]
+
+function readHash(): NavKey {
+  const h = window.location.hash.replace(/^#\/?/, "")
+  return (KEYS as string[]).includes(h) ? (h as NavKey) : "domains"
+}
+
+function useHashRoute(): [NavKey, (k: NavKey) => void] {
+  const [route, setRoute] = useState<NavKey>(readHash)
+  useEffect(() => {
+    const onHash = () => setRoute(readHash())
+    window.addEventListener("hashchange", onHash)
+    return () => window.removeEventListener("hashchange", onHash)
+  }, [])
+  return [route, (k) => { window.location.hash = `/${k}` }]
+}
+
+// Route-level error state — the dashboard's RouteErrorPage pattern, trimmed of
+// its cloud-only stale-chunk detection.
+class ScreenBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  render() {
+    if (!this.state.error) return this.props.children
+    return (
+      <div className="flex min-h-[60vh] flex-col items-center justify-center px-6 text-center">
+        <div className="flex size-12 items-center justify-center rounded-full border border-border bg-card">
+          <AlertTriangle className="size-6 text-muted-foreground" />
+        </div>
+        <h1 className="mt-5 text-xl font-semibold tracking-tight">Something went wrong</h1>
+        <p className="mt-2 max-w-md text-sm text-muted-foreground">This screen hit an unexpected error. Reloading usually clears it.</p>
+        <pre className="mt-3 max-w-md overflow-x-auto rounded-md border border-border bg-muted/40 px-3 py-2 text-left font-mono text-xs text-muted-foreground">
+          {this.state.error.message}
+        </pre>
+        <Button className="mt-6" onClick={() => window.location.reload()}>
+          <RefreshCw className="size-4" /> Refresh page
+        </Button>
+      </div>
+    )
+  }
+}
+
+export function App() {
+  const { connection } = useConnection()
+  const [route, navigate] = useHashRoute()
+
+  if (!connection) return <ConnectScreen />
+
+  return (
+    <AppShell active={route} onNavigate={navigate}>
+      <ScreenBoundary key={route}>
+        {route === "domains" && <DomainsScreen />}
+        {route === "messages" && <MessagesScreen />}
+        {route === "credentials" && <CredentialsScreen />}
+        {route === "webhooks" && <WebhooksScreen />}
+      </ScreenBoundary>
+    </AppShell>
+  )
+}

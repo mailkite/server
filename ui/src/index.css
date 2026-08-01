@@ -1,0 +1,247 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* MailKite dark palette as the default theme (shadcn token contract). The theme
+   is selected with `data-theme` on <html>, set pre-paint in index.html and
+   toggled at runtime by lib/theme.tsx. Ported from the MailKite dashboard so the
+   self-hosted console and MailKite Cloud share one visual system. */
+:root {
+  color-scheme: dark;
+  --radius: 0.625rem;
+  --background: #0b0d12;
+  --foreground: #e6e9ef;
+  --card: #11141b;
+  --card-foreground: #e6e9ef;
+  --popover: #11141b;
+  --popover-foreground: #e6e9ef;
+  --primary: #6ea8fe;
+  --primary-foreground: #06080d;
+  --secondary: #1e2430;
+  --secondary-foreground: #e6e9ef;
+  --muted: #11141b;
+  --muted-foreground: #8a93a6;
+  --accent: #1e2430;
+  --accent-foreground: #e6e9ef;
+  --destructive: #ef4444;
+  --destructive-foreground: #ffffff;
+  --border: #1e2430;
+  --input: #1e2430;
+  --ring: #6ea8fe;
+  --brand-2: #7c6cff;
+
+  /* Elevation ladder — rail (recessed) < background < card < surface < raised < raised-2.
+     `hairline` is the inner top-edge highlight; pair with border-border:
+     shadow-[inset_0_1px_0_0_var(--hairline)]. Light mode inverts the ramp. */
+  --rail: #0d1016;
+  --surface: #171b25;
+  --raised: #1f2532;
+  --raised-2: #28303f;
+  --hairline: rgb(255 255 255 / 0.07);
+}
+
+/* Light theme: same tokens remapped. Wins over :root via attribute specificity. */
+html[data-theme="light"] {
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #11141b;
+  --card: #f6f8fc;
+  --card-foreground: #11141b;
+  --popover: #ffffff;
+  --popover-foreground: #11141b;
+  --primary: #2f6fe0;
+  --primary-foreground: #ffffff;
+  --secondary: #eef2f8;
+  --secondary-foreground: #11141b;
+  --muted: #f6f8fc;
+  --muted-foreground: #5a6473;
+  --accent: #eef2f8;
+  --accent-foreground: #11141b;
+  --destructive: #dc2626;
+  --destructive-foreground: #ffffff;
+  --border: #e3e8f0;
+  --input: #e3e8f0;
+  --ring: #2f6fe0;
+  --brand-2: #6a4dff;
+
+  --rail: #eaeef5;
+  --surface: #f6f8fc;
+  --raised: #ffffff;
+  --raised-2: #eef2f8;
+  --hairline: rgb(255 255 255 / 0.9);
+}
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-rail: var(--rail);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-raised-2: var(--raised-2);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+    outline-color: color-mix(in oklab, var(--color-ring) 50%, transparent);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  /* Tailwind v4 Preflight defaults buttons to cursor:default — restore the affordance. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for],
+  a[href] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+}
+
+/* ---- Brand visuals (shared with the MailKite dashboard + site) ----------- */
+
+.text-gradient {
+  background-image: linear-gradient(100deg, var(--primary), var(--brand-2));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Soft radial brand glow placed behind the Connect screen. */
+.brand-glow {
+  background:
+    radial-gradient(
+      40rem 28rem at 50% -10%,
+      color-mix(in oklab, var(--primary) 26%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      32rem 24rem at 85% 10%,
+      color-mix(in oklab, var(--brand-2) 20%, transparent),
+      transparent 70%
+    );
+}
+html[data-theme="light"] .brand-glow {
+  opacity: 0.5;
+}
+
+/* Ambient backdrop: one-time fade-in, no looping shimmer behind live data. */
+.brand-backdrop {
+  animation: brand-backdrop-in 1.2s ease-out both;
+}
+@keyframes brand-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-backdrop { animation: none; }
+}
+
+/* Faint grid backdrop, fading out toward the edges. */
+.grid-bg {
+  background-image:
+    linear-gradient(to right, color-mix(in oklab, var(--color-border) 70%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in oklab, var(--color-border) 70%, transparent) 1px, transparent 1px);
+  background-size: 56px 56px;
+  -webkit-mask-image: radial-gradient(65% 55% at 50% 0%, #000 0%, transparent 80%);
+  mask-image: radial-gradient(65% 55% at 50% 0%, #000 0%, transparent 80%);
+}
+
+/* Gradient hairline border for the hero/connect card. */
+.gradient-ring {
+  position: relative;
+}
+.gradient-ring::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    140deg,
+    color-mix(in oklab, var(--primary) 60%, transparent),
+    color-mix(in oklab, var(--brand-2) 60%, transparent)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}
+
+/* Card drop shadow — dark drop + faint violet bloom; softer in light mode. */
+.panel-lift {
+  box-shadow:
+    0 30px 60px -20px rgb(0 0 0 / 0.55),
+    0 18px 36px -18px color-mix(in oklab, var(--brand-2) 22%, transparent);
+}
+html[data-theme="light"] .panel-lift {
+  box-shadow:
+    0 24px 50px -22px rgb(17 20 27 / 0.18),
+    0 12px 28px -16px color-mix(in oklab, var(--brand-2) 16%, transparent);
+}
+
+/* Thin, theme-matched scrollbars everywhere. */
+*,
+.scroll-body {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in oklab, var(--color-border) 90%, var(--foreground) 10%) transparent;
+}
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background-color: color-mix(in oklab, var(--color-border) 90%, var(--foreground) 10%);
+  border-radius: 9999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in oklab, var(--color-border) 50%, var(--foreground) 50%);
+}
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* Sidebar nav: scrollbar hidden until hover. */
+.nav-scroll { scrollbar-width: none; }
+.nav-scroll::-webkit-scrollbar { width: 0; height: 0; }
+.nav-scroll:hover { scrollbar-width: thin; }
+.nav-scroll:hover::-webkit-scrollbar { width: 10px; height: 10px; }
+
+/* Message rows fade up in sequence on first render (delay set inline per row). */
+.inbox-row-in {
+  animation: inbox-row-in 0.42s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@keyframes inbox-row-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .inbox-row-in { animation: none; }
+}

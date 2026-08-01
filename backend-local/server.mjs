@@ -243,7 +243,7 @@ function serveUi(req, res) {
   } catch { return false; }
 }
 
-const server = createServer(async (req, res) => {
+const handle = async (req, res) => {
   const handler = routes[`${req.method} ${new URL(req.url, 'http://x').pathname}`];
   if (!handler) {
     if (serveUi(req, res)) return;
@@ -255,6 +255,20 @@ const server = createServer(async (req, res) => {
   } catch (e) {
     json(res, e.status || 500, { error: e.message });
   }
-});
+};
 
-server.listen(PORT, HOST, () => console.log(`backend-local listening on http://${HOST}:${PORT} (data: ${DATA_DIR})`));
+// Native TLS (optional): set TLS_CERT + TLS_KEY to serve HTTPS directly — no reverse
+// proxy needed for a single-box install.
+const TLS_CERT = process.env.TLS_CERT, TLS_KEY = process.env.TLS_KEY;
+let server, scheme;
+if (TLS_CERT && TLS_KEY) {
+  const { createServer: createHttps } = await import('node:https');
+  const { readFileSync: rf } = await import('node:fs');
+  server = createHttps({ cert: rf(TLS_CERT), key: rf(TLS_KEY) }, handle);
+  scheme = 'https';
+} else {
+  server = createServer(handle);
+  scheme = 'http';
+}
+
+server.listen(PORT, HOST, () => console.log(`backend-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`));
