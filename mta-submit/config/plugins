@@ -1,0 +1,25 @@
+# Enabled Haraka plugins, in order, for the SUBMISSION edge. Keep this minimal.
+
+# TLS first — AUTH is only advertised on an encrypted session (auth_base/auth_mailkite
+# refuse to offer AUTH unless connection.tls.enabled). Requires certs in config/tls/
+# (tls_cert.pem + tls_key.pem). Without them the worker won't start TLS and AUTH is never
+# offered — so this MUST be provisioned before the edge is useful. See README §TLS.
+tls
+
+# DKIM signing — signs outbound messages with per-domain keys. Loads config from
+# config/dkim.ini. The private keys live on disk (generated per-domain); the platform
+# publishes the public keys via DNS. Required for the outbound delivery path.
+dkim
+
+# SMTP AUTH (PLAIN/LOGIN) validated against the Worker's POST /api/smtp/auth. On success
+# auth_base flips connection.relaying = true, which is what permits relaying to any domain.
+auth_mailkite
+
+# The bridge: queue hook → Bearer POST raw RFC822 to the Worker's POST /api/relay, which
+# parses the MIME and runs it through the same send pipeline as /v1/send.
+mailkite_relay
+
+# HTTP→outbound bridge: accepts RFC822 from the CF Worker via HTTP POST on :8080 and
+# injects into Haraka's outbound queue via outbound.send_email(). BYPASSES hook_queue,
+# so mailkite_relay never fires on this path — no loop. See docs/architecture/mailkite-provider.md.
+mailkite_http_inject

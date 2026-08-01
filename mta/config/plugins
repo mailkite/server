@@ -1,0 +1,22 @@
+# Enabled Haraka plugins, in order. Keep this minimal — the edge is a dumb pipe.
+
+# Reject RCPT for any domain not accepted by the platform (anti-open-relay). Live lookup
+# against the Worker's GET /api/mx/accepted-domains, with a short-TTL in-memory cache and a
+# re-check on cache miss, so a freshly-verified domain is accepted on its first message —
+# no host_list sync/cron/restart needed. config/host_list is now only a cold-start seed.
+mailkite_rcpt
+
+# Edge verdicts → emitted as x-mailkite-* headers by mailkite_ingest, stored by the
+# Worker. SPF + DKIM verify run standalone (no daemon). DMARC has no bundled plugin
+# (derived later). rspamd needs a running rspamd daemon — enable in prod once available.
+spf
+dkim
+#rspamd
+
+# STARTTLS. Reads certs from config/tls/ (tls_cert.pem + tls_key.pem), placed there by
+# /usr/local/bin/mailkite-mta-tls-deploy.sh on issue and on every renewal — see
+# config/tls.ini and README §TLS. Without it the edge accepts mail in the clear.
+tls
+
+# The bridge: queue hook → HMAC POST to the Worker ingest.
+mailkite_ingest

@@ -1,0 +1,5 @@
+# Recipient domains this edge accepts mail for (anti-open-relay). One per line.
+# Synced from the Worker at boot by scripts/sync-host-list.mjs (GET /api/mx/accepted-domains);
+# this committed copy is the fallback/seed when the sync is unavailable.
+#
+# example.com

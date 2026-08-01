@@ -1,0 +1,6 @@
+node_modules/
+# package-lock.json IS committed — deployed application, installed with `npm ci`.
+# See mta/README.md §Deps for why ignoring it was a problem.
+# TLS material is provisioned per-host, never committed.
+config/tls/
+*.log

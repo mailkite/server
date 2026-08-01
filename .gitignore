@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+*.pem
+config/tls/*
+!config/tls/README.md
+imap/config/tls/*
+!imap/config/tls/README.md
+*.log
+.DS_Store
+config/dkim/*/

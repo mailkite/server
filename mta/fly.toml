@@ -1,0 +1,36 @@
+# Fly.io config for one MailKite MX host. Deploy a second app (e.g. mailkite-mx-2) in
+# another region for the mx2 priority-20 failover — same code, different app/region/PTR.
+# See docs/architecture/haraka-mx-implementation.md.
+
+app = "mailkite-mx-1"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+# Non-secret config. Secrets (MAILKITE_HMAC_SECRET) come from `fly secrets set`.
+[env]
+  MAILKITE_API_URL = "https://api.mailkite.dev"
+  MAILKITE_INGEST_URL = "https://api.mailkite.dev/api/ingest"
+
+# Raw SMTP on port 25 — no http/tls handlers (STARTTLS is negotiated inside Haraka).
+[[services]]
+  internal_port = 25
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 25
+
+  # An MX must not cold-start: keep at least one machine always running.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

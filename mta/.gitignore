@@ -1,0 +1,10 @@
+node_modules/
+# package-lock.json IS committed — this is a deployed application, not a published library,
+# and the box installs with `npm ci`. Ignoring it meant the deployed dependency tree was
+# whatever the deploying laptop happened to resolve, which is how a corrupt @haraka/ocsp
+# entry silently broke `npm ci` here and in mta-submit. See README §Deps.
+# TLS material is provisioned per-host, never committed.
+config/tls/
+# Runtime-synced; the committed config/host_list is just the seed/fallback.
+config/host_list.synced
+*.log

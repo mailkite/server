@@ -1,0 +1,45 @@
+# MailKite Server
+
+**An open-source, programmable mail server for apps and AI agents.**
+Haraka-based SMTP (MX + submission) and a thin IMAP head, designed around one small HTTP
+backend contract — run it fully self-hosted, or point the same components at
+[MailKite Cloud](https://mailkite.dev) and skip the ops.
+
+> Status: **pre-release scaffold.** The SMTP/IMAP edges here run in production at
+> MailKite; the local backend (`backend-local/`) and UI (`ui/`) land next. Watch
+> releases for v0.1.0.
+
+## What's in the box
+
+| Component | What it is |
+|---|---|
+| [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
+| [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
+| [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
+| `backend-local/` *(planned)* | Reference backend: Node + SQLite + file blobs implementing the contract below |
+| `ui/` *(planned)* | Web UI for domains, DKIM/SPF status, message log, routes, and webhooks — with pluggable providers (local backend or MailKite Cloud) |
+
+## The backend contract
+
+Every component is a dumb protocol head. State lives behind a handful of HMAC-authenticated
+HTTP endpoints (`/api/imap/{auth,status,list,flags,raw}`, an inbound ingest hook, and a
+submission inject endpoint). Implement that contract over any store and every edge here
+works unchanged — the reference SQLite backend and MailKite Cloud are just two
+implementations of it. See `docs/contract.md` *(lands with `backend-local/`)*.
+
+## Self-hosting
+
+See [`docs/self-hosting.md`](docs/self-hosting.md) — DNS records, TLS provisioning, and
+systemd units. Short version: one VPS, three daemons, your backend URL in one env var.
+
+Don't want to run mail infrastructure? [MailKite Cloud](https://mailkite.dev) is the hosted
+backend + dashboard, with deliverability, retention, and support handled for you.
+
+## License
+
+Code is licensed under **AGPL-3.0-only** — see [`LICENSE`](LICENSE).
+The **MailKite name and logo are not covered by the code license**; see
+[`TRADEMARK.md`](TRADEMARK.md) and [`brand-assets/`](brand-assets/). Forks must use their
+own name and branding.
+
+Contributions require a signed CLA — see [`CONTRIBUTING.md`](CONTRIBUTING.md).

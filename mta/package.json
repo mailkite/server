@@ -1,0 +1,24 @@
+{
+  "name": "@mailkite/mta",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MailKite MX edge - Haraka :25 inbound server that POSTs accepted mail to the backend ingest endpoint as a webhook.",
+  "scripts": {
+    "start": "haraka -c .",
+    "dev": "haraka -c .",
+    "sync-host-list": "node scripts/sync-host-list.mjs",
+    "lint": "eslint ."
+  },
+  "dependencies": {
+    "Haraka": "^3.3.1"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.6.0",
+    "globals": "^17.7.0"
+  },
+  "license": "AGPL-3.0-only"
+}
