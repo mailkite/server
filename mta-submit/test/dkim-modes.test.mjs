@@ -1,8 +1,7 @@
-// Docs: docs/architecture/anti-spam.md, docs/architecture/mailk-provider.md
 // DKIM identity resolution + signing parity.
 //
-// This plugin used to exist as TWO divergent copies: the repo's (mailn, parent-signing) and an
-// untracked fork on the mailk box (per-subdomain signing, 3-arg sign_dkim). They were merged
+// This plugin used to exist as TWO divergent copies: the repo's (parent-signing) and an
+// untracked per-subdomain-signing fork. They were merged
 // into one config-driven file. These tests are the safety net for that merge, because getting
 // it wrong doesn't throw — it silently sends mail UNSIGNED or under the wrong identity, and the
 // first symptom is a deliverability cliff.
@@ -133,15 +132,15 @@ describe('sign_dkim — produces the identity the mode selected', () => {
 
   test('per_sub signs d=<sub> using the pool key — not d=<pool>', () => {
     const hdr = signFor('pool-a.example', 'per_sub', 'evil.pool-a.example');
-    assert.match(hdr, /d=evil\.mailk\.us;/);
+    assert.match(hdr, /d=evil\.pool-a\.example;/);
     assert.match(hdr, /s=haraka;/);
-    assert.doesNotMatch(hdr, /d=mailk\.us;/);
+    assert.doesNotMatch(hdr, /d=pool-a\.example;/);
   });
 
   test('parent signs d=<pool> for the same input shape', () => {
     const hdr = signFor('pool-b.example', 'parent', 'sub.pool-b.example');
-    assert.match(hdr, /d=mailn\.app;/);
-    assert.doesNotMatch(hdr, /d=sub\.mailn\.app;/);
+    assert.match(hdr, /d=pool-b\.example;/);
+    assert.doesNotMatch(hdr, /d=sub\.pool-b\.example;/);
   });
 
   test('a signature is actually produced and carries a body hash', () => {
