@@ -5,9 +5,9 @@ Haraka-based SMTP (MX + submission) and a thin IMAP head, designed around one sm
 backend contract — run it fully self-hosted, or point the same components at
 [MailKite Cloud](https://mailkite.dev) and skip the ops.
 
-> Status: **pre-release scaffold.** The SMTP/IMAP edges here run in production at
-> MailKite; the local backend (`backend-local/`) and UI (`ui/`) land next. Watch
-> releases for v0.1.0.
+> Status: **pre-release.** The SMTP/IMAP edges here run in production at MailKite, and
+> the reference backend passes the conformance + end-to-end suites; the UI (`ui/`) lands
+> next. Watch releases for v0.1.0.
 
 ## What's in the box
 
@@ -16,7 +16,7 @@ backend contract — run it fully self-hosted, or point the same components at
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| `backend-local/` *(planned)* | Reference backend: Node + SQLite + file blobs implementing the contract below |
+| [`backend-local/`](backend-local/) | Reference backend: Node + SQLite + file blobs implementing the contract below — zero npm dependencies |
 | `ui/` *(planned)* | Web UI for domains, DKIM/SPF status, message log, routes, and webhooks — with pluggable providers (local backend or MailKite Cloud) |
 
 ## The backend contract
@@ -25,7 +25,9 @@ Every component is a dumb protocol head. State lives behind a handful of HMAC-au
 HTTP endpoints (`/api/imap/{auth,status,list,flags,raw}`, an inbound ingest hook, and a
 submission inject endpoint). Implement that contract over any store and every edge here
 works unchanged — the reference SQLite backend and MailKite Cloud are just two
-implementations of it. See `docs/contract.md` *(lands with `backend-local/`)*.
+implementations of it. See [`docs/contract.md`](docs/contract.md); the conformance suite
+in `backend-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
+full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
 
 ## Self-hosting
 

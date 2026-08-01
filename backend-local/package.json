@@ -1,0 +1,15 @@
+{
+  "name": "@mailkite/backend-local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Reference backend for MailKite Server - implements the backend contract (docs/contract.md) over SQLite + file blobs. Zero npm dependencies.",
+  "type": "module",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "engines": {
+    "node": ">=22.5"
+  }
+}
