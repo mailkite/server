@@ -88,15 +88,41 @@ node cli.mjs list
 node cli.mjs reset-admin you@yourdomain.com      # recover a squatted web-console claim
 ```
 
+## Outbound (smarthost)
+
+`/api/relay` enforces the From-domain gate, records the message to **Sent**, and
+loop-delivers to locally-hosted domains. Everyone else goes through the **smarthost**
+named by `SMARTHOST` — api-local deliberately isn't an outbound MTA, because
+deliverability (IP reputation, DKIM alignment, feedback loops) is the part you should
+think hardest about before self-hosting.
+
+| `SMARTHOST` | Behavior |
+|---|---|
+| *(unset)* | External recipients are skipped and logged. Local delivery + IMAP still work. |
+| `cloud` | Forwards the raw message to MailKite Cloud's `/api/relay` with `MAILKITE_SEND_KEY` as Bearer. |
+| `smtp://user:pass@host:587` | Relays to any SMTP smarthost — EHLO → STARTTLS → AUTH PLAIN/LOGIN → DATA. |
+| `smtps://user:pass@host:465` | Same, implicit TLS. |
+
+```sh
+SMARTHOST=cloud MAILKITE_SEND_KEY=mk_live_… node server.mjs
+SMARTHOST=smtp://apikey:mk_live_…@smtp.mailkite.dev:587 node server.mjs
+```
+
+The relay response reports what happened: `{localDelivered, relayed, smarthost, externalSkipped}`.
+A smarthost failure returns **502** rather than silently dropping mail — the submission
+edge maps that to an SMTP tempfail so the client retries (the Sent copy is already stored,
+so a retry can duplicate it; that's the deliberate trade against losing the message).
+
+> **`SMARTHOST=cloud` gate:** the cloud applies *its own* From-domain verification. The
+> sending domain must be verified on the MailKite Cloud account that owns
+> `MAILKITE_SEND_KEY`, not just added here — otherwise the cloud returns 4xx and you'll
+> see a 502 with its reason attached.
+
+Credentials in a URL land in `ps` output and shell history; prefer an env file
+(`EnvironmentFile=` in systemd, `env_file:` in compose).
+
 ## v1 scope — honest limits
 
-- **Outbound is not internet delivery.** `/api/relay` enforces the From-domain gate,
-  records to **Sent**, and loop-delivers to locally-hosted domains. Recipients on foreign
-  domains are accepted-and-skipped (logged). Real outbound needs a smarthost hop or
-  MailKite Cloud — deliverability (IP reputation, DKIM, FBLs) is exactly the part you
-  should think twice about self-hosting. A smarthost option is on the roadmap.
-- **No webhooks yet.** Inbound mail is stored and readable over IMAP; the
-  inbound-webhook dispatch the cloud does is roadmap.
 - **Single process, single SQLite file.** Right-sized for a personal/app mailbox volume,
   not a mail farm.
 - IMAP brute-force lockout is per-IP (20 fails / 15 min), mirroring the cloud's
