@@ -1,5 +1,5 @@
-// `local` driver — backend-local's admin API (/api/admin/*). Same-origin in
-// production (backend-local serves ui/dist); the Vite dev server proxies /api.
+// `local` driver — api-local's admin API (/api/admin/*). Same-origin in
+// production (api-local serves ui/dist); the Vite dev server proxies /api.
 //
 // Auth: cookie session by default (magic-link sign-in; the x-mailkite-ui header
 // is the backend's CSRF gate). Advanced mode still accepts the admin secret as a
@@ -39,7 +39,7 @@ export class LocalProvider implements MailProvider {
         },
       })
     } catch {
-      throw new ProviderError(0, "Can't reach the server — is backend-local running?")
+      throw new ProviderError(0, "Can't reach the server — is api-local running?")
     }
     if (!res.ok) {
       if (res.status === 401 && !this.cfg.secret) window.dispatchEvent(new Event("mk:unauthorized"))

@@ -4,7 +4,7 @@ The MX edge can serve **multiple backends at once**: each recipient domain is ow
 exactly one backend, RCPT checks consult every backend's accepted-domains list, and
 accepted mail is ingested to whichever backend owns the recipient's domain. One shared
 edge (with its port 25, PTR, and IP reputation) can then front MailKite Cloud, a
-self-hosted `backend-local`, or any other implementation of
+self-hosted `api-local`, or any other implementation of
 [the contract](contract.md) — simultaneously.
 
 ## Prior art (why this design)
@@ -52,7 +52,7 @@ Without `config/backends.json`, behavior is **byte-identical to single-backend m
   recipients). All groups 2xx → `250`. Any group fails → `DENYSOFT` (sender retries).
 - **Duplicates on retry:** if backend A stored the message and backend B tempfailed, the
   sender's retry re-delivers to both. Backends should make ingest idempotent —
-  `backend-local` dedupes on (recipient, mailbox, content hash); the raw blob store is
+  `api-local` dedupes on (recipient, mailbox, content hash); the raw blob store is
   already content-addressed. Cross-backend recipient mixes are rare in practice (one
   message addressed to two different organizations' domains at the same MX).
 

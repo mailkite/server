@@ -1,5 +1,5 @@
 {
-  "name": "@mailkite/backend-local",
+  "name": "@mailkite/api-local",
   "version": "0.1.0",
   "private": true,
   "description": "Reference backend for MailKite Server - implements the backend contract (docs/contract.md) over SQLite + file blobs. Zero npm dependencies.",

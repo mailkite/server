@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// End-to-end smoke: backend-local + the real imap/ edge daemon.
+// End-to-end smoke: api-local + the real imap/ edge daemon.
 //
-//   backend-local (HTTP contract) ← imap/server.js (imap-core) ← this script (TLS IMAP client)
+//   api-local (HTTP contract) ← imap/server.js (imap-core) ← this script (TLS IMAP client)
 //
 // Boots both processes with a temp data dir + self-signed cert, ingests a signed message
 // the same way mta/plugins/mailkite_ingest.js does, then runs a real IMAP session:
@@ -33,11 +33,11 @@ execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days
 
 // 2. Seed the backend store and boot both daemons.
 const env = { ...process.env, DATA_DIR: join(tmp, 'data') };
-execFileSync('node', [join(ROOT, 'backend-local/cli.mjs'), 'add-user', 'e2e'], { env });
-execFileSync('node', [join(ROOT, 'backend-local/cli.mjs'), 'add-domain', 'local.example', 'e2e'], { env });
-const appPassword = execFileSync('node', [join(ROOT, 'backend-local/cli.mjs'), 'add-app-password', 'bob@local.example'], { env }).toString().trim();
+execFileSync('node', [join(ROOT, 'api-local/cli.mjs'), 'add-user', 'e2e'], { env });
+execFileSync('node', [join(ROOT, 'api-local/cli.mjs'), 'add-domain', 'local.example', 'e2e'], { env });
+const appPassword = execFileSync('node', [join(ROOT, 'api-local/cli.mjs'), 'add-app-password', 'bob@local.example'], { env }).toString().trim();
 
-procs.push(spawn('node', [join(ROOT, 'backend-local/server.mjs')],
+procs.push(spawn('node', [join(ROOT, 'api-local/server.mjs')],
   { env: { ...env, HMAC_SECRET: SECRET, PORT: String(API_PORT) }, stdio: 'inherit' }));
 procs.push(spawn('node', [join(ROOT, 'imap/server.js')], {
   env: {
@@ -127,5 +127,5 @@ const list = await (await fetch(`http://127.0.0.1:${API_PORT}/api/imap/list`, {
 if (!list.messages[0].flags.includes('Seen')) fail('STORE flag did not persist to backend');
 ok('flag persisted through edge → backend');
 
-console.log('\nE2E PASS: mta-style ingest → backend-local → imap-core edge → IMAP client');
+console.log('\nE2E PASS: mta-style ingest → api-local → imap-core edge → IMAP client');
 cleanup(0);

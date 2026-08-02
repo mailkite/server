@@ -1,5 +1,5 @@
 // Admin API tests — the surface ui/'s `local` provider driver consumes.
-// backend-local only (not part of the cross-backend contract suite).
+// api-local only (not part of the cross-backend contract suite).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';

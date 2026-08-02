@@ -16,7 +16,7 @@ backend contract — run it fully self-hosted, or point the same components at
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| [`backend-local/`](backend-local/) | Reference backend: Node + SQLite + file blobs implementing the contract below — zero npm dependencies |
+| [`api-local/`](api-local/) | Reference backend: Node + SQLite + file blobs implementing the contract below — zero npm dependencies |
 | `ui/` *(planned)* | Web UI for domains, DKIM/SPF status, message log, routes, and webhooks — with pluggable providers (local backend or MailKite Cloud) |
 
 ## The backend contract
@@ -28,7 +28,7 @@ works unchanged — the reference SQLite backend and MailKite Cloud are just two
 implementations of it. One MX edge can even serve **several backends at once**, routing
 each recipient domain to its owner — see [`docs/multi-backend.md`](docs/multi-backend.md).
 See [`docs/contract.md`](docs/contract.md); the conformance suite
-in `backend-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
+in `api-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
 full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
 
 ## Self-hosting

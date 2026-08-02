@@ -1,6 +1,6 @@
 # Deploy the backend to Fly.io
 
-Deploys `backend-local` + the built web console as one HTTP app, with SQLite on a Fly
+Deploys `api-local` + the built web console as one HTTP app, with SQLite on a Fly
 volume. (The SMTP/IMAP edges are separate — see `mta/fly.toml` for the MX edge, and
 `docs/self-hosting.md` for the full picture.)
 

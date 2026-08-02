@@ -1,6 +1,6 @@
 // The UI's provider contract — every screen talks to a MailProvider, never to a
 // backend directly. Mirrors the repo's backend philosophy: the same screens work
-// against backend-local (self-hosted) or MailKite Cloud, and `capabilities()`
+// against api-local (self-hosted) or MailKite Cloud, and `capabilities()`
 // gates what a driver's backend can honestly claim.
 
 export type Mailbox = "INBOX" | "Sent"

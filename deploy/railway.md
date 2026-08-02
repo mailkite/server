@@ -1,11 +1,11 @@
 # Deploy the backend to Railway
 
-Deploys `backend-local` + the built web console as one HTTP service with SQLite on a
+Deploys `api-local` + the built web console as one HTTP service with SQLite on a
 Railway volume.
 
 1. **New project → Deploy from GitHub repo** (your fork/clone of this repo).
 2. In the service **Settings**:
-   - **Build → Dockerfile path:** `backend-local/Dockerfile` (Railway builds from the
+   - **Build → Dockerfile path:** `api-local/Dockerfile` (Railway builds from the
      repo root, which is the context the Dockerfile expects).
    - **Volumes:** add a volume mounted at **`/data`** — this holds the SQLite DB and
      message blobs.

@@ -1,4 +1,4 @@
-# backend-local — reference backend (SQLite)
+# api-local — reference backend (SQLite)
 
 The reference implementation of [the backend contract](../docs/contract.md): a single
 Node process, SQLite (`node:sqlite`) + content-addressed file blobs, **zero npm
@@ -25,7 +25,7 @@ and the hosted backend for that deployment style already exists — it's
 
 ```sh
 HMAC_SECRET=$(openssl rand -hex 32) node server.mjs
-# → backend-local listening on http://127.0.0.1:8787
+# → api-local listening on http://127.0.0.1:8787
 ```
 
 Set the same value as `MAILKITE_HMAC_SECRET` on the edges, and point them at it:
@@ -38,7 +38,7 @@ no reverse proxy needed for a single-box install.
 
 ```sh
 # from the repo root (the image bundles the built web console)
-docker build -f backend-local/Dockerfile -t mailkite-server .
+docker build -f api-local/Dockerfile -t mailkite-server .
 docker run -d -p 8787:8787 -e HMAC_SECRET=$(openssl rand -hex 32) \
   -v mail-data:/data mailkite-server
 ```

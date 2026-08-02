@@ -9,15 +9,15 @@ one product.
 | | |
 |---|---|
 | Stack | Vite · React 19 · TypeScript (strict) · Tailwind v4 · shadcn primitives · TanStack Query |
-| Served by | `backend-local` (it serves `ui/dist` with SPA fallback) — or `npm run dev` with a proxy to `:8787` |
+| Served by | `api-local` (it serves `ui/dist` with SPA fallback) — or `npm run dev` with a proxy to `:8787` |
 | Data access | everything goes through a **provider driver** (`src/providers/`) — screens never call a backend directly |
 
 ## Run
 
 ```sh
 npm install
-npm run build          # → dist/, picked up by backend-local automatically
-# or, for development (proxies /api to a local backend-local on :8787):
+npm run build          # → dist/, picked up by api-local automatically
+# or, for development (proxies /api to a local api-local on :8787):
 npm run dev
 ```
 
@@ -35,7 +35,7 @@ in `localStorage`, and sign-out revokes the session server-side.
 **Advanced:** the sign-in screen still accepts the backend's `HMAC_SECRET` as a Bearer
 (kept in `localStorage`) for loopback/scripted setups — treat that path as
 root-credential handling, and prefer magic links anywhere the console is reachable
-beyond localhost. Backend auth details: `../backend-local/README.md` §Console auth.
+beyond localhost. Backend auth details: `../api-local/README.md` §Console auth.
 
 ## Provider drivers
 
@@ -43,7 +43,7 @@ beyond localhost. Backend auth details: `../backend-local/README.md` §Console a
 gate features on `capabilities()` — that's why the local backend's missing webhook
 dispatch shows as an honest roadmap card instead of a broken screen.
 
-- `local.ts` — backend-local's `/api/admin/*` (v1, complete)
+- `local.ts` — api-local's `/api/admin/*` (v1, complete)
 - `cloud.ts` — MailKite Cloud (experimental stub; the Connect screen shows Cloud as
   coming-soon and links to mailkite.dev)
 

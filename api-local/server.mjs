@@ -1,4 +1,4 @@
-// backend-local — reference implementation of the backend contract (docs/contract.md).
+// api-local — reference implementation of the backend contract (docs/contract.md).
 // Node >= 22.5 (node:sqlite), zero npm dependencies.
 //
 // Implements: /api/ingest, /api/mx/accepted-domains, /api/smtp/auth, /api/relay,
@@ -22,7 +22,7 @@ const DATA_DIR = process.env.DATA_DIR || new URL('./data', import.meta.url).path
 const MAX_BODY = 30 * 1024 * 1024; // a hair above the edges' 25 MB databytes
 const DRIFT_S = 5 * 60;
 
-if (!SECRET) { console.error('backend-local: HMAC_SECRET is required'); process.exit(1); }
+if (!SECRET) { console.error('api-local: HMAC_SECRET is required'); process.exit(1); }
 
 const store = new Store(DATA_DIR);
 
@@ -380,7 +380,7 @@ if (TLS_CERT && TLS_KEY) {
 }
 
 server.listen(PORT, HOST, () => {
-  console.log(`backend-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);
+  console.log(`api-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);
   if (setupToken) {
     const host = HOST === '::' || HOST === '0.0.0.0' ? 'localhost' : HOST;
     console.log(`setup: no admin configured — visit ${scheme}://${host}:${PORT}/setup#token=${setupToken} to claim this server (one-time link)`);

@@ -1,4 +1,4 @@
-// Webhooks & routes — capability-gated. backend-local v1 stores mail for IMAP
+// Webhooks & routes — capability-gated. api-local v1 stores mail for IMAP
 // but doesn't dispatch webhooks yet; this screen says so honestly and shows
 // where the capability exists today (MailKite Cloud) — the funnel, in-product.
 
@@ -13,7 +13,7 @@ export function WebhooksScreen() {
   const caps = useQuery({ queryKey: ["capabilities"], queryFn: () => provider.capabilities() })
 
   if (caps.data?.webhooks) {
-    // A future driver (or a backend-local that grew dispatch) unlocks the real screen.
+    // A future driver (or a api-local that grew dispatch) unlocks the real screen.
     return (
       <div className="space-y-6">
         <PageHeader title="Webhooks & routes" description="Deliver inbound mail to your code." />
@@ -35,7 +35,7 @@ export function WebhooksScreen() {
           </div>
           <p className="font-medium">Not in the local backend yet</p>
           <p className="max-w-md text-sm text-muted-foreground">
-            backend-local stores inbound mail for IMAP today; webhook dispatch is on the roadmap
+            api-local stores inbound mail for IMAP today; webhook dispatch is on the roadmap
             (<a href="https://github.com/mailkite/server" target="_blank" rel="noreferrer" className="text-primary hover:underline">follow along</a>).
             MailKite Cloud does this now — receive email as a webhook, with retries, signing, and delivery logs.
           </p>

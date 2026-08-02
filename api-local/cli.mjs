@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Admin CLI for backend-local. Operates directly on the SQLite store (no server needed).
+// Admin CLI for api-local. Operates directly on the SQLite store (no server needed).
 //
 //   node cli.mjs add-user <name>
 //   node cli.mjs add-domain <domain> <user>

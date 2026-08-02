@@ -3,7 +3,7 @@
 One VPS, three daemons, one backend URL. This guide covers the generic setup; each
 component README has the component-specific detail.
 
-> **Pre-release note:** until `backend-local/` ships, the backend contract is only
+> **Pre-release note:** until `api-local/` ships, the backend contract is only
 > implemented by MailKite Cloud — so today "self-hosted" means running the edges against
 > a cloud account. Fully-local operation lands with v0.1.0.
 

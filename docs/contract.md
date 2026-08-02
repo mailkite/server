@@ -2,7 +2,7 @@
 
 Every edge in this repo (MX, submission, IMAP) is a stateless protocol head. All state and
 policy live behind the HTTP endpoints below. Implement them over any store and every edge
-works unchanged — `backend-local/` (SQLite) and [MailKite Cloud](https://mailkite.dev) are
+works unchanged — `api-local/` (SQLite) and [MailKite Cloud](https://mailkite.dev) are
 two implementations of the same contract.
 
 **Versioning:** this document is the contract. Backwards-incompatible changes bump the
@@ -139,9 +139,9 @@ it however suits them (the reference backend uses its CLI instead).
 
 ## Conformance
 
-`backend-local/test/contract.test.mjs` is the executable form of this document. Run it
+`api-local/test/contract.test.mjs` is the executable form of this document. Run it
 against any backend with:
 
 ```sh
-BACKEND_URL=http://localhost:8787 HMAC_SECRET=... node --test backend-local/test/
+BACKEND_URL=http://localhost:8787 HMAC_SECRET=... node --test api-local/test/
 ```

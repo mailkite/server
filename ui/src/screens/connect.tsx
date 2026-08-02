@@ -123,7 +123,7 @@ function AdvancedSecretForm() {
           <Input
             aria-label="Admin secret"
             type="password"
-            placeholder="The HMAC_SECRET backend-local runs with"
+            placeholder="The HMAC_SECRET api-local runs with"
             value={secret}
             onChange={(e) => setSecret(e.target.value)}
             autoComplete="off"

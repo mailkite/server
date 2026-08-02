@@ -1,12 +1,12 @@
-# MailKite Server — backend-local + built UI in one image.
+# MailKite Server — api-local + built UI in one image.
 #
-# Build context is the REPO ROOT (the image needs ui/ and backend-local/):
-#   docker build -f backend-local/Dockerfile -t mailkite-server .
+# Build context is the REPO ROOT (the image needs ui/ and api-local/):
+#   docker build -f api-local/Dockerfile -t mailkite-server .
 # Run:
 #   docker run -d -p 8787:8787 -e HMAC_SECRET=$(openssl rand -hex 32) \
 #     -v mail-data:/data mailkite-server
 #
-# node:24-alpine — backend-local needs Node >= 22.5 (node:sqlite); zero npm deps at runtime.
+# node:24-alpine — api-local needs Node >= 22.5 (node:sqlite); zero npm deps at runtime.
 
 # --- stage 1: build the UI -------------------------------------------------------
 FROM node:24-alpine AS ui
@@ -19,7 +19,7 @@ RUN npm run build
 # --- stage 2: runtime ------------------------------------------------------------
 FROM node:24-alpine
 WORKDIR /app
-COPY backend-local/ ./backend-local/
+COPY api-local/ ./api-local/
 COPY --from=ui /build/ui/dist ./ui/dist
 
 # DATA_DIR is the only writable state (SQLite + blobs) — keep it on a volume.
@@ -36,4 +36,4 @@ EXPOSE 8787
 USER node
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/').then(()=>process.exit(0),()=>process.exit(1))"
-CMD ["node", "backend-local/server.mjs"]
+CMD ["node", "api-local/server.mjs"]

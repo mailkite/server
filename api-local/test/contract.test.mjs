@@ -1,4 +1,4 @@
-// Conformance suite for docs/contract.md. By default it boots backend-local on an
+// Conformance suite for docs/contract.md. By default it boots api-local on an
 // ephemeral port with a temp DATA_DIR and exercises every endpoint the edges call.
 // Point it at another backend with BACKEND_URL (+ HMAC_SECRET, and pre-provisioned
 // fixtures) to test contract parity.

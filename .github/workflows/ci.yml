@@ -14,7 +14,7 @@ jobs:
           node-version: 24
       - name: Conformance + admin suites (zero-dep — no install)
         run: npm test
-        working-directory: backend-local
+        working-directory: api-local
       - name: Install IMAP edge deps
         run: npm ci --no-audit --no-fund
         working-directory: imap

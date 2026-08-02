@@ -15,7 +15,7 @@ Thanks for helping build an open, programmable mail server.
 
 Each component is a standalone Node.js project (`npm ci` inside `mta/`, `mta-submit/`,
 `imap/`). See each component's README for local run instructions. End-to-end smoke tests
-against the reference backend arrive with `backend-local/`.
+against the reference backend arrive with `api-local/`.
 
 ## Known dependency quirks (please don't "fix" these)
 

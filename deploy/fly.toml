@@ -12,7 +12,7 @@ app = "mailkite-server-backend"   # pick your own app name
 primary_region = "iad"
 
 [build]
-  dockerfile = "backend-local/Dockerfile"
+  dockerfile = "api-local/Dockerfile"
 
 [env]
   HOST = "0.0.0.0"

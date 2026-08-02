@@ -13,7 +13,7 @@ prefer otherwise.
 ## Scope
 
 - The SMTP edges (`mta/`, `mta-submit/`), the IMAP edge (`imap/`), the reference backend
-  (`backend-local/`), and the UI (`ui/`).
+  (`api-local/`), and the UI (`ui/`).
 - The hosted MailKite Cloud service is **out of scope here** — report cloud issues to
   bucabay@gmail.com directly, not via this repository.
 
