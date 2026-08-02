@@ -1,42 +1,143 @@
-// Connect — the console's front door. Local: point at a backend-local and prove
-// the secret works (one overview call) before entering. Cloud: honest
-// coming-soon card that routes to MailKite Cloud today.
+// Sign in — the console's front door. Default: email → magic link (no secrets
+// to paste or store). Advanced: the old admin-secret path for scripted or
+// loopback setups. Cloud: honest coming-soon card that routes to MailKite Cloud.
 
 import { useState, type FormEvent } from "react"
 import { useMutation } from "@tanstack/react-query"
-import { ArrowUpRight, Server } from "lucide-react"
+import { ArrowUpRight, ChevronDown, MailCheck, Send } from "lucide-react"
 import { toast } from "sonner"
 import { Logo } from "@/components/logo"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { errMsg } from "@/lib/format"
+import { requestLink } from "@/providers/auth"
 import { LocalProvider } from "@/providers/local"
 import { useConnection } from "@/providers/context"
+import { cn } from "@/lib/utils"
 
-export function ConnectScreen() {
-  const { connect } = useConnection()
+function MagicLinkForm() {
+  const [email, setEmail] = useState("")
+  const [sentTo, setSentTo] = useState<string | null>(null)
+
+  const send = useMutation({
+    mutationFn: () => requestLink(email.trim()),
+    onSuccess: () => setSentTo(email.trim()),
+    onError: (e) => toast.error(errMsg(e)),
+  })
+
+  if (sentTo) {
+    return (
+      <div className="space-y-3 text-center">
+        <div className="mx-auto flex size-11 items-center justify-center rounded-full border border-border bg-secondary">
+          <MailCheck className="size-5 text-primary" />
+        </div>
+        <p className="text-sm font-medium">Check your email</p>
+        <p className="text-sm text-muted-foreground">
+          If <span className="font-mono text-xs">{sentTo}</span> is an admin here, a sign-in link is on
+          its way. It works once and expires in 15 minutes.
+        </p>
+        <p className="text-xs text-muted-foreground">
+          Server not sending email yet? The link is printed in its log:{" "}
+          <code className="font-mono">journalctl -u mailkite-backend | grep magic-link</code>
+        </p>
+        <Button variant="ghost" size="sm" onClick={() => setSentTo(null)}>
+          Use a different email
+        </Button>
+      </div>
+    )
+  }
+
+  return (
+    <form
+      onSubmit={(e: FormEvent) => {
+        e.preventDefault()
+        if (email.trim()) send.mutate()
+      }}
+      className="space-y-3"
+    >
+      <div>
+        <label htmlFor="signin-email" className="mb-1 block text-xs font-medium text-muted-foreground">
+          Admin email
+        </label>
+        <Input
+          id="signin-email"
+          type="email"
+          placeholder="you@yourdomain.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          autoFocus
+        />
+      </div>
+      <Button type="submit" className="w-full" disabled={send.isPending || !email.trim()}>
+        <Send className="size-4" /> {send.isPending ? "Sending…" : "Email me a sign-in link"}
+      </Button>
+    </form>
+  )
+}
+
+function AdvancedSecretForm() {
+  const { connectWithSecret } = useConnection()
+  const [open, setOpen] = useState(false)
   const [baseUrl, setBaseUrl] = useState("")
   const [secret, setSecret] = useState("")
 
   const test = useMutation({
-    mutationFn: async () => {
-      const provider = new LocalProvider({ baseUrl, secret })
-      return provider.overview()
-    },
+    mutationFn: async () => new LocalProvider({ baseUrl, secret }).overview(),
     onSuccess: (o) => {
-      connect({ provider: "local", config: { baseUrl, secret } })
+      connectWithSecret({ baseUrl, secret })
       toast.success(`Connected — ${o.domains} domain${o.domains === 1 ? "" : "s"}, ${o.inbox.total} message${o.inbox.total === 1 ? "" : "s"}`)
     },
     onError: (e) => toast.error(errMsg(e)),
   })
 
-  const submit = (e: FormEvent) => {
-    e.preventDefault()
-    if (!secret.trim()) return toast.error("Paste the server's admin secret (HMAC_SECRET)")
-    test.mutate()
-  }
+  return (
+    <div className="border-t border-border pt-3">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        className="flex w-full items-center justify-between text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        Advanced: connect with the admin secret
+        <ChevronDown className={cn("size-3.5 transition-transform", open && "rotate-180")} />
+      </button>
+      {open && (
+        <form
+          onSubmit={(e: FormEvent) => {
+            e.preventDefault()
+            if (!secret.trim()) return toast.error("Paste the server's admin secret (HMAC_SECRET)")
+            test.mutate()
+          }}
+          className="mt-3 space-y-3"
+        >
+          <Input
+            aria-label="Server URL"
+            placeholder="Server URL — same origin if empty"
+            value={baseUrl}
+            onChange={(e) => setBaseUrl(e.target.value)}
+            autoComplete="off"
+            spellCheck={false}
+          />
+          <Input
+            aria-label="Admin secret"
+            type="password"
+            placeholder="The HMAC_SECRET backend-local runs with"
+            value={secret}
+            onChange={(e) => setSecret(e.target.value)}
+            autoComplete="off"
+          />
+          <Button type="submit" variant="secondary" className="w-full" disabled={test.isPending}>
+            {test.isPending ? "Checking…" : "Connect with secret"}
+          </Button>
+        </form>
+      )}
+    </div>
+  )
+}
 
+export function SignInScreen() {
   return (
     <div className="relative flex min-h-dvh items-center justify-center overflow-hidden bg-background px-4">
       <div className="brand-glow pointer-events-none absolute inset-0" aria-hidden />
@@ -55,46 +156,12 @@ export function ConnectScreen() {
 
         <Card className="gradient-ring panel-lift">
           <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Server className="size-4 text-primary" /> Connect to your server
-            </CardTitle>
-            <CardDescription>
-              The console talks to backend-local&rsquo;s admin API. Paste the server&rsquo;s{" "}
-              <code className="font-mono text-xs">HMAC_SECRET</code> to unlock it.
-            </CardDescription>
+            <CardTitle>Sign in</CardTitle>
+            <CardDescription>Enter your admin email and we&rsquo;ll send a one-time sign-in link.</CardDescription>
           </CardHeader>
-          <CardContent>
-            <form onSubmit={submit} className="space-y-3">
-              <div>
-                <label htmlFor="server-url" className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Server URL
-                </label>
-                <Input
-                  id="server-url"
-                  placeholder="Same origin (leave empty)"
-                  value={baseUrl}
-                  onChange={(e) => setBaseUrl(e.target.value)}
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </div>
-              <div>
-                <label htmlFor="server-secret" className="mb-1 block text-xs font-medium text-muted-foreground">
-                  Admin secret
-                </label>
-                <Input
-                  id="server-secret"
-                  type="password"
-                  placeholder="The HMAC_SECRET backend-local runs with"
-                  value={secret}
-                  onChange={(e) => setSecret(e.target.value)}
-                  autoComplete="off"
-                />
-              </div>
-              <Button type="submit" className="w-full" disabled={test.isPending}>
-                {test.isPending ? "Checking…" : "Connect"}
-              </Button>
-            </form>
+          <CardContent className="space-y-4">
+            <MagicLinkForm />
+            <AdvancedSecretForm />
           </CardContent>
         </Card>
 

@@ -3,7 +3,7 @@
 // Sidebar: brand, nav (capability-gated), theme toggle + disconnect.
 
 import { useState, type ReactNode } from "react"
-import { Globe, Inbox, KeyRound, Menu, Moon, Sun, Unplug, Webhook, X, ArrowUpRight } from "lucide-react"
+import { Globe, Inbox, KeyRound, LogOut, Menu, Moon, Sun, Webhook, X, ArrowUpRight } from "lucide-react"
 import { Logo } from "@/components/logo"
 import { Button } from "@/components/ui/button"
 import { useTheme } from "@/lib/theme"
@@ -71,15 +71,18 @@ export function AppShell({
         Don&rsquo;t want to run a server? MailKite Cloud <ArrowUpRight className="size-3" />
       </a>
       <div className="flex items-center justify-between gap-2 px-1">
-        <span className="truncate text-xs text-muted-foreground" title={connection?.config.baseUrl || "same origin"}>
-          {connection ? "Local server" : "Not connected"}
+        <span
+          className="truncate text-xs text-muted-foreground"
+          title={connection?.mode === "cookie" ? connection.email : connection?.config.baseUrl || "same origin"}
+        >
+          {connection?.mode === "cookie" ? connection.email : connection ? "Local server" : "Not connected"}
         </span>
         <div className="flex items-center gap-1">
           <Button variant="ghost" size="icon" onClick={toggle} aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}>
             {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </Button>
-          <Button variant="ghost" size="icon" onClick={disconnect} aria-label="Disconnect from server" title="Disconnect">
-            <Unplug className="size-4" />
+          <Button variant="ghost" size="icon" onClick={disconnect} aria-label="Sign out" title="Sign out">
+            <LogOut className="size-4" />
           </Button>
         </div>
       </div>

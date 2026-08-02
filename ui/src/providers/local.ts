@@ -1,8 +1,10 @@
 // `local` driver — backend-local's admin API (/api/admin/*). Same-origin in
 // production (backend-local serves ui/dist); the Vite dev server proxies /api.
 //
-// Auth model (v1): the backend's admin secret, pasted once on the Connect screen
-// and kept in localStorage. This is a single-admin loopback console — see README.
+// Auth: cookie session by default (magic-link sign-in; the x-mailkite-ui header
+// is the backend's CSRF gate). Advanced mode still accepts the admin secret as a
+// Bearer for scripted/loopback use. A 401 on any call announces itself via the
+// "mk:unauthorized" window event so the app can return to sign-in.
 
 import {
   NotImplemented,
@@ -14,7 +16,7 @@ import {
   type Overview,
 } from "./types"
 
-export type LocalConfig = { baseUrl: string; secret: string }
+export type LocalConfig = { baseUrl: string; secret?: string }
 
 export class LocalProvider implements MailProvider {
   readonly name = "Local server"
@@ -30,7 +32,8 @@ export class LocalProvider implements MailProvider {
       res = await fetch(this.cfg.baseUrl + path, {
         ...init,
         headers: {
-          authorization: `Bearer ${this.cfg.secret}`,
+          "x-mailkite-ui": "1",
+          ...(this.cfg.secret ? { authorization: `Bearer ${this.cfg.secret}` } : {}),
           ...(init?.body ? { "content-type": "application/json" } : {}),
           ...init?.headers,
         },
@@ -39,6 +42,7 @@ export class LocalProvider implements MailProvider {
       throw new ProviderError(0, "Can't reach the server — is backend-local running?")
     }
     if (!res.ok) {
+      if (res.status === 401 && !this.cfg.secret) window.dispatchEvent(new Event("mk:unauthorized"))
       const body = await res.json().catch(() => ({}) as { error?: string })
       throw new ProviderError(res.status, body.error || `Request failed (${res.status})`)
     }

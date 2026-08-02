@@ -50,6 +50,17 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS auth_fails (           -- IMAP brute-force lockout, per IP
     ip TEXT PRIMARY KEY, count INTEGER NOT NULL, last INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS admin_users (          -- who may sign in to the console
+    email TEXT PRIMARY KEY, added INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS login_tokens (         -- magic-link tokens (hashed, single-use)
+    token_hash TEXT PRIMARY KEY, email TEXT NOT NULL,
+    expires INTEGER NOT NULL, used INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS sessions (             -- console sessions (hashed cookie tokens)
+    token_hash TEXT PRIMARY KEY, email TEXT NOT NULL,
+    created INTEGER NOT NULL, last_seen INTEGER NOT NULL
+  );
 `;
 
 export class Store {
@@ -124,6 +135,61 @@ export class Store {
     return r.count >= max;
   }
   authOk(ip) { if (ip) this.db.prepare('DELETE FROM auth_fails WHERE ip = ?').run(ip); }
+
+  // --- console auth: admin users, magic-link tokens, sessions -------------------
+  // Raw tokens never touch disk — only sha256 hashes are stored, so a copied
+  // database can't be replayed into a session.
+
+  hashToken(raw) { return createHash('sha256').update(String(raw)).digest('hex'); }
+
+  addAdminUser(email) {
+    this.db.prepare('INSERT OR IGNORE INTO admin_users(email, added) VALUES (?, ?)')
+      .run(email.toLowerCase(), Date.now());
+  }
+  isAdminUser(email) {
+    return !!this.db.prepare('SELECT 1 FROM admin_users WHERE email = ?')
+      .get(String(email || '').toLowerCase());
+  }
+  adminUserCount() { return this.db.prepare('SELECT COUNT(*) c FROM admin_users').get().c; }
+
+  createLoginToken(email, ttlMs = 15 * 60 * 1000) {
+    const raw = 'mk_login_' + randomBytes(24).toString('base64url');
+    this.db.prepare('INSERT INTO login_tokens(token_hash, email, expires, used) VALUES (?, ?, ?, 0)')
+      .run(this.hashToken(raw), email.toLowerCase(), Date.now() + ttlMs);
+    return raw;
+  }
+  /** Single-use: returns the email once, null on unknown/expired/already-used. */
+  consumeLoginToken(raw) {
+    const h = this.hashToken(raw);
+    const r = this.db.prepare('SELECT email, expires, used FROM login_tokens WHERE token_hash = ?').get(h);
+    if (!r || r.used || Date.now() > r.expires) return null;
+    this.db.prepare('UPDATE login_tokens SET used = 1 WHERE token_hash = ?').run(h);
+    return r.email;
+  }
+
+  createSession(email) {
+    const raw = 'mk_sess_' + randomBytes(32).toString('base64url');
+    const now = Date.now();
+    this.db.prepare('INSERT INTO sessions(token_hash, email, created, last_seen) VALUES (?, ?, ?, ?)')
+      .run(this.hashToken(raw), email.toLowerCase(), now, now);
+    return raw;
+  }
+  /** Rolling 30-day validity: any use inside the window extends it. */
+  sessionEmail(raw, maxIdleMs = 30 * 24 * 60 * 60 * 1000) {
+    if (!raw) return null;
+    const h = this.hashToken(raw);
+    const r = this.db.prepare('SELECT email, last_seen FROM sessions WHERE token_hash = ?').get(h);
+    if (!r) return null;
+    if (Date.now() - r.last_seen > maxIdleMs) {
+      this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(h);
+      return null;
+    }
+    this.db.prepare('UPDATE sessions SET last_seen = ? WHERE token_hash = ?').run(Date.now(), h);
+    return r.email;
+  }
+  deleteSession(raw) {
+    if (raw) this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(this.hashToken(raw));
+  }
 
   // --- mailboxes / messages -----------------------------------------------------
 

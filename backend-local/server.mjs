@@ -11,7 +11,7 @@
 // Env: HMAC_SECRET (required), PORT (8787), HOST (127.0.0.1), DATA_DIR (./data)
 
 import { createServer } from 'node:http';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
 
@@ -36,6 +36,57 @@ const readBody = (req) => new Promise((resolve, reject) => {
 const json = (res, status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
 const constEq = (a, b) => { const A = Buffer.from(String(a)), B = Buffer.from(String(b)); return A.length === B.length && timingSafeEqual(A, B); };
 const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^Bearer /, ''), SECRET);
+
+// ---- console auth (magic link + cookie sessions) --------------------------------
+// ADMIN_EMAIL anchors who may sign in; more admins can be invited once inside.
+// First boot with neither ADMIN_EMAIL nor any admin on record prints a one-time
+// /setup URL to the log (the WordPress-install pattern: possession of the server
+// log/console is the root credential).
+const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
+const SEND_KEY = process.env.MAILKITE_SEND_KEY || '';
+const MAGIC_FROM = process.env.MAGIC_LINK_FROM || '';
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+if (ADMIN_EMAIL) store.addAdminUser(ADMIN_EMAIL);
+let setupToken = (!ADMIN_EMAIL && store.adminUserCount() === 0)
+  ? 'mk_setup_' + randomBytes(24).toString('base64url')
+  : null;
+
+const getCookie = (req, name) => {
+  for (const part of String(req.headers.cookie || '').split(';')) {
+    const i = part.indexOf('=');
+    if (i > -1 && part.slice(0, i).trim() === name) return part.slice(i + 1).trim();
+  }
+  return null;
+};
+// Cookie path requires the x-mailkite-ui header — a cross-site form can post
+// cookies but can't attach custom headers, so this is the CSRF gate.
+const uiSession = (req) => (req.headers['x-mailkite-ui'] === '1' ? store.sessionEmail(getCookie(req, 'mk_session')) : null);
+const adminAuthed = (req) => edgeAuthed(req) || !!uiSession(req);
+const clientIp = (req) => String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+const setSessionCookie = (res, raw, maxAge = 30 * 24 * 60 * 60) =>
+  res.setHeader('set-cookie', `mk_session=${raw}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${scheme === 'https' ? '; Secure' : ''}`);
+
+async function deliverLink(email, url) {
+  if (!SEND_KEY) {
+    console.log(`magic-link: ${url}`); // greppable fallback: journalctl … | grep magic-link
+    return;
+  }
+  const from = MAGIC_FROM || `no-reply@${store.domains()[0] || 'localhost'}`;
+  try {
+    const r = await fetch('https://api.mailkite.dev/v1/send', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${SEND_KEY}`, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        from, to: email,
+        subject: 'Sign in to MailKite Server',
+        text: `Click to sign in to your MailKite Server console:\n\n${url}\n\nThe link works once and expires in 15 minutes. If you didn't request it, ignore this email.`,
+      }),
+    });
+    if (!r.ok) console.error(`magic-link: send failed (${r.status}) — falling back to log\nmagic-link: ${url}`);
+  } catch (e) {
+    console.error(`magic-link: send error (${e.message}) — falling back to log\nmagic-link: ${url}`);
+  }
+}
 
 // x-mailkite-signature: t=<unix>,v1=<hex of HMAC-SHA256(secret, "<t>." + raw)>
 function verifyIngestSignature(req, raw) {
@@ -163,13 +214,65 @@ const routes = {
   },
 };
 
+// ---- console auth endpoints ------------------------------------------------------
+Object.assign(routes, {
+  // Always {ok:true} — no account enumeration. Rate-limited per IP (5 / 15 min).
+  'POST /api/auth/request-link': async (req, res, raw) => {
+    const ip = 'link:' + clientIp(req);
+    if (store.lockedOut(ip, 5)) return json(res, 200, { ok: true });
+    store.authFail(ip);
+    const { email } = JSON.parse(raw.toString() || '{}');
+    if (typeof email === 'string' && store.isAdminUser(email)) {
+      const token = store.createLoginToken(email);
+      await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
+    }
+    return json(res, 200, { ok: true });
+  },
+  'POST /api/auth/verify': async (req, res, raw) => {
+    const { token } = JSON.parse(raw.toString() || '{}');
+    const email = token ? store.consumeLoginToken(token) : null;
+    if (!email) return json(res, 400, { error: 'That sign-in link is invalid or expired — request a new one.', code: 'bad_token' });
+    setSessionCookie(res, store.createSession(email));
+    return json(res, 200, { ok: true, email });
+  },
+  'POST /api/auth/logout': async (req, res) => {
+    store.deleteSession(getCookie(req, 'mk_session'));
+    setSessionCookie(res, '', 0);
+    return json(res, 200, { ok: true });
+  },
+  'GET /api/auth/me': async (req, res) => {
+    const email = uiSession(req);
+    return email ? json(res, 200, { email }) : json(res, 401, { error: 'not signed in' });
+  },
+  // First-boot only: consumes the one-time token printed to the server log.
+  'POST /api/auth/setup': async (req, res, raw) => {
+    const { token, email } = JSON.parse(raw.toString() || '{}');
+    if (!setupToken || !token || !constEq(token, setupToken) || store.adminUserCount() > 0) {
+      return json(res, 400, { error: 'Setup is not available — an admin already exists.', code: 'no_setup' });
+    }
+    if (!EMAIL_RE.test(email || '')) return json(res, 400, { error: 'Enter a valid email address.', code: 'bad_email' });
+    setupToken = null;
+    store.addAdminUser(email);
+    setSessionCookie(res, store.createSession(email));
+    return json(res, 200, { ok: true, email: email.toLowerCase() });
+  },
+  // Invite another console admin (admin-only).
+  'POST /api/admin/users': async (req, res, raw) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const { email } = JSON.parse(raw.toString() || '{}');
+    if (!EMAIL_RE.test(email || '')) return json(res, 400, { error: 'Enter a valid email address.', code: 'bad_email' });
+    store.addAdminUser(email);
+    return json(res, 200, { ok: true });
+  },
+});
+
 // ---- admin API (drives ui/ via the `local` provider driver) -------------------
 // Same HMAC bearer as the edges. Single-tenant: everything belongs to the implicit
 // 'default' account (multi-user provisioning stays on the CLI).
 
 Object.assign(routes, {
   'GET /api/admin/overview': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const u = store.defaultUser();
     return json(res, 200, {
       domains: store.domains().length,
@@ -179,27 +282,27 @@ Object.assign(routes, {
     });
   },
   'GET /api/admin/domains': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { domains: store.domains() });
   },
   'POST /api/admin/domains': async (req, res, raw) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const { domain } = JSON.parse(raw.toString() || '{}');
     if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(domain || '')) return json(res, 400, { error: 'invalid domain', code: 'bad_domain' });
     store.addDomain(domain, store.defaultUser());
     return json(res, 200, { ok: true, domain: domain.toLowerCase() });
   },
   'GET /api/admin/credentials': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const u = store.defaultUser();
     return json(res, 200, { apiKeys: store.apiKeys(u), appPasswords: store.appPasswordUsers(u) });
   },
   'POST /api/admin/keys': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { key: store.addApiKey(store.defaultUser()) });
   },
   'POST /api/admin/app-passwords': async (req, res, raw) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const { username } = JSON.parse(raw.toString() || '{}');
     const domain = (username || '').split('@')[1] || '';
     if (!store.domains().includes(domain.toLowerCase())) {
@@ -208,7 +311,7 @@ Object.assign(routes, {
     return json(res, 200, { username, password: store.addAppPassword(username, store.defaultUser()) });
   },
   'GET /api/admin/messages': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const q = new URL(req.url, 'http://x').searchParams;
     const mailbox = q.get('mailbox') === 'Sent' ? 'Sent' : 'INBOX';
     const limit = Math.min(Number(q.get('limit')) || 50, 200);
@@ -218,7 +321,7 @@ Object.assign(routes, {
     return json(res, 200, { messages, nextBefore: messages.length === limit ? messages[messages.length - 1].uid : null });
   },
   'GET /api/admin/raw': async (req, res) => {
-    if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const q = new URL(req.url, 'http://x').searchParams;
     const bytes = store.raw(store.defaultUser(), q.get('mailbox') === 'Sent' ? 'Sent' : 'INBOX', Number(q.get('uid')));
     if (!bytes) return json(res, 404, { error: 'raw unavailable', code: 'no_raw' });
@@ -276,4 +379,10 @@ if (TLS_CERT && TLS_KEY) {
   scheme = 'http';
 }
 
-server.listen(PORT, HOST, () => console.log(`backend-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`));
+server.listen(PORT, HOST, () => {
+  console.log(`backend-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);
+  if (setupToken) {
+    const host = HOST === '::' || HOST === '0.0.0.0' ? 'localhost' : HOST;
+    console.log(`setup: no admin configured — visit ${scheme}://${host}:${PORT}/setup#token=${setupToken} to claim this server (one-time link)`);
+  }
+});

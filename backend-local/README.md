@@ -48,6 +48,27 @@ MX edge). Hosted variants: [`../deploy/fly.md`](../deploy/fly.md) ·
 [`../deploy/railway.md`](../deploy/railway.md). One replica only — SQLite is
 single-writer; `/data` is the database, back it up.
 
+## Console auth (magic link)
+
+The web console signs in with **email magic links**, not the HMAC secret:
+
+| Env | Purpose |
+|---|---|
+| `ADMIN_EMAIL` | The anchor admin — the one address always allowed to request a sign-in link. More admins can be invited from a signed-in session (`POST /api/admin/users`). |
+| `MAILKITE_SEND_KEY` | Optional MailKite Cloud API key used to *send* the link emails (`POST api.mailkite.dev/v1/send`). Without it, links are printed to the server log: `journalctl -u mailkite-backend \| grep magic-link`. |
+| `MAGIC_LINK_FROM` | Optional From address for link emails (default `no-reply@<first hosted domain>`). |
+
+**First boot with no `ADMIN_EMAIL` and no admins on record** prints a one-time
+`/setup#token=…` URL to the log — the WordPress-install pattern: possession of the
+server console is the root credential, and whoever opens that URL names the first
+admin. The token dies on use (or on restart once an admin exists).
+
+Sessions are httpOnly cookies (`mk_session`, 30-day rolling), stored **hashed** in
+SQLite so a copied database can't be replayed. Cookie-authed requests must also carry
+the `x-mailkite-ui: 1` header (CSRF gate). Link requests are rate-limited per IP
+(5 / 15 min) and never reveal whether an email is an admin. The **HMAC bearer keeps
+working** on `/api/admin/*` for scripts and the conformance suite.
+
 ## Provision accounts (CLI)
 
 ```sh

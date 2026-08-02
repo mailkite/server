@@ -8,7 +8,9 @@ import { AlertTriangle, RefreshCw } from "lucide-react"
 import { AppShell, type NavKey } from "@/components/app-shell"
 import { Button } from "@/components/ui/button"
 import { useConnection } from "@/providers/context"
-import { ConnectScreen } from "@/screens/connect"
+import { SignInScreen } from "@/screens/connect"
+import { LoginCallback } from "@/screens/login"
+import { SetupScreen } from "@/screens/setup"
 import { DomainsScreen } from "@/screens/domains"
 import { MessagesScreen } from "@/screens/messages"
 import { CredentialsScreen } from "@/screens/credentials"
@@ -59,10 +61,22 @@ class ScreenBoundary extends Component<{ children: ReactNode }, { error: Error |
 }
 
 export function App() {
-  const { connection } = useConnection()
+  const { connection, status } = useConnection()
   const [route, navigate] = useHashRoute()
 
-  if (!connection) return <ConnectScreen />
+  // Auth flows land on real paths (magic-link URLs survive # fragments better).
+  const path = window.location.pathname
+  if (path === "/login") return <LoginCallback />
+  if (path === "/setup") return <SetupScreen />
+
+  if (status === "loading") {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background">
+        <span className="text-sm text-muted-foreground">Loading…</span>
+      </div>
+    )
+  }
+  if (!connection) return <SignInScreen />
 
   return (
     <AppShell active={route} onNavigate={navigate}>

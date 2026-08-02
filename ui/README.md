@@ -21,17 +21,21 @@ npm run build          # → dist/, picked up by backend-local automatically
 npm run dev
 ```
 
-Open the backend's URL, pick **Local server**, and paste the `HMAC_SECRET` the backend
-runs with.
+Open the backend's URL and sign in with your admin email — a one-time **magic link**
+arrives by email (or in the server log if sending isn't configured yet).
 
-## Auth model (v1) — read this
+## Auth model
 
-The console authenticates with the backend's **admin secret** (the same `HMAC_SECRET`
-the SMTP/IMAP edges use), kept in `localStorage` after you connect. That makes this a
-**single-admin console**: anyone with the secret owns the server. Keep backend-local
-bound to loopback or a private network (its default is `127.0.0.1`), and front it with
-TLS + your own access control if you expose it beyond that. Scoped console logins are
-roadmap.
+Default is **magic-link sign-in**: enter an allowed admin email (`ADMIN_EMAIL` env, the
+/setup first-boot claim, or an invited admin), click the emailed link, and the browser
+holds an **httpOnly session cookie** (30-day rolling; hashed server-side; `Secure` under
+TLS; a custom `x-mailkite-ui` header doubles as the CSRF gate). Nothing sensitive lives
+in `localStorage`, and sign-out revokes the session server-side.
+
+**Advanced:** the sign-in screen still accepts the backend's `HMAC_SECRET` as a Bearer
+(kept in `localStorage`) for loopback/scripted setups — treat that path as
+root-credential handling, and prefer magic links anywhere the console is reachable
+beyond localhost. Backend auth details: `../backend-local/README.md` §Console auth.
 
 ## Provider drivers
 
