@@ -58,10 +58,18 @@ The web console signs in with **email magic links**, not the HMAC secret:
 | `MAILKITE_SEND_KEY` | Optional MailKite Cloud API key used to *send* the link emails (`POST api.mailkite.dev/v1/send`). Without it, links are printed to the server log: `journalctl -u mailkite-backend \| grep magic-link`. |
 | `MAGIC_LINK_FROM` | Optional From address for link emails (default `no-reply@<first hosted domain>`). |
 
-**First boot with no `ADMIN_EMAIL` and no admins on record** prints a one-time
-`/setup#token=…` URL to the log — the WordPress-install pattern: possession of the
-server web console is the root credential, and whoever opens that URL names the first
-admin. The token dies on use (or on restart once an admin exists).
+**Unclaimed install** (no `ADMIN_EMAIL`, no admins on record): the web console shows
+"Create your admin account" and **the first email entered becomes the admin** — the
+WordPress-install pattern, race accepted by design since a fresh install is short-lived
+and empty. Every claim is logged (`web console admin claimed: <email> ip=<ip>`). If
+someone else claims your install first, box access is the root credential:
+
+```sh
+node cli.mjs reset-admin you@yourdomain.com   # wipes admins + ALL sessions, seeds yours
+```
+
+Setting `ADMIN_EMAIL` disables claiming entirely — recommended for internet-facing
+installs provisioned by script.
 
 Sessions are httpOnly cookies (`mk_session`, 30-day rolling), stored **hashed** in
 SQLite so a copied database can't be replayed. Cookie-authed requests must also carry
@@ -77,6 +85,7 @@ node cli.mjs add-domain yourdomain.com gabe
 node cli.mjs add-key gabe                       # → mk_local_… (SMTP AUTH password / relay Bearer)
 node cli.mjs add-app-password you@yourdomain.com # → mk_imap_… (IMAP login)
 node cli.mjs list
+node cli.mjs reset-admin you@yourdomain.com      # recover a squatted web-console claim
 ```
 
 ## v1 scope — honest limits

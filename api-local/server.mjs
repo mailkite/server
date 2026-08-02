@@ -11,7 +11,7 @@
 // Env: HMAC_SECRET (required), PORT (8787), HOST (127.0.0.1), DATA_DIR (./data)
 
 import { createServer } from 'node:http';
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
 
@@ -39,17 +39,16 @@ const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^
 
 // ---- console auth (magic link + cookie sessions) --------------------------------
 // ADMIN_EMAIL anchors who may sign in; more admins can be invited once inside.
-// First boot with neither ADMIN_EMAIL nor any admin on record prints a one-time
-// /setup URL to the log (the WordPress-install pattern: possession of the server
-// log/console is the root credential).
+// With neither ADMIN_EMAIL nor any admin on record, the install is unclaimed and the
+// first email entered on the web console becomes the admin (the WordPress-install
+// pattern — accepted race by decision; recovery is `cli.mjs reset-admin`, since box
+// access is the root credential).
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const SEND_KEY = process.env.MAILKITE_SEND_KEY || '';
 const MAGIC_FROM = process.env.MAGIC_LINK_FROM || '';
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 if (ADMIN_EMAIL) store.addAdminUser(ADMIN_EMAIL);
-let setupToken = (!ADMIN_EMAIL && store.adminUserCount() === 0)
-  ? 'mk_setup_' + randomBytes(24).toString('base64url')
-  : null;
+const needsSetup = () => !ADMIN_EMAIL && store.adminUserCount() === 0;
 
 const getCookie = (req, name) => {
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -244,15 +243,18 @@ Object.assign(routes, {
     const email = uiSession(req);
     return email ? json(res, 200, { email }) : json(res, 401, { error: 'not signed in' });
   },
-  // First-boot only: consumes the one-time token printed to the server log.
+  // Unclaimed-install probe for the web console's routing.
+  'GET /api/auth/status': async (req, res) => json(res, 200, { needsSetup: needsSetup() }),
+  // First-visitor admin claim (WordPress-style): only while the install has no admin
+  // and no ADMIN_EMAIL. Recovery from a squatted claim: `cli.mjs reset-admin <email>`.
   'POST /api/auth/setup': async (req, res, raw) => {
-    const { token, email } = JSON.parse(raw.toString() || '{}');
-    if (!setupToken || !token || !constEq(token, setupToken) || store.adminUserCount() > 0) {
-      return json(res, 400, { error: 'Setup is not available — an admin already exists.', code: 'no_setup' });
+    if (!needsSetup()) {
+      return json(res, 403, { error: 'Setup is not available — an admin already exists.', code: 'no_setup' });
     }
+    const { email } = JSON.parse(raw.toString() || '{}');
     if (!EMAIL_RE.test(email || '')) return json(res, 400, { error: 'Enter a valid email address.', code: 'bad_email' });
-    setupToken = null;
     store.addAdminUser(email);
+    console.log(`web console admin claimed: ${email.toLowerCase()} ip=${clientIp(req)}`);
     setSessionCookie(res, store.createSession(email));
     return json(res, 200, { ok: true, email: email.toLowerCase() });
   },
@@ -381,8 +383,7 @@ if (TLS_CERT && TLS_KEY) {
 
 server.listen(PORT, HOST, () => {
   console.log(`api-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);
-  if (setupToken) {
-    const host = HOST === '::' || HOST === '0.0.0.0' ? 'localhost' : HOST;
-    console.log(`setup: no admin configured — visit ${scheme}://${host}:${PORT}/setup#token=${setupToken} to claim this server (one-time link)`);
+  if (needsSetup()) {
+    console.log('setup: no admin configured — the first email entered on the web console claims this install (recover with: cli.mjs reset-admin <email>)');
   }
 });

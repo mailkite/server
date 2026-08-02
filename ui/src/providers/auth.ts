@@ -19,8 +19,19 @@ export async function verifyToken(token: string): Promise<string> {
   return body.email as string
 }
 
-export async function completeSetup(token: string, email: string): Promise<string> {
-  const res = await post("/api/auth/setup", { token, email })
+/** Unclaimed install? Drives the create-admin routing. */
+export async function authStatus(): Promise<{ needsSetup: boolean }> {
+  try {
+    const res = await fetch("/api/auth/status", { headers: { "x-mailkite-ui": "1" } })
+    if (!res.ok) return { needsSetup: false }
+    return (await res.json()) as { needsSetup: boolean }
+  } catch {
+    return { needsSetup: false }
+  }
+}
+
+export async function completeSetup(email: string): Promise<string> {
+  const res = await post("/api/auth/setup", { email })
   const body = await res.json().catch(() => ({}) as { email?: string; error?: string })
   if (!res.ok) throw new Error(body.error || "Setup failed.")
   return body.email as string
@@ -42,7 +53,7 @@ export async function logout(): Promise<void> {
   await post("/api/auth/logout", {}).catch(() => {})
 }
 
-/** Token from a /login#token=… or /setup#token=… URL. */
+/** Token from a /login#token=… URL. */
 export function tokenFromHash(): string | null {
   const m = window.location.hash.match(/token=([^&]+)/)
   return m ? decodeURIComponent(m[1]) : null

@@ -4,9 +4,11 @@
 // provider seam keeps screens portable if that changes.
 
 import { Component, useEffect, useState, type ReactNode } from "react"
+import { useQuery } from "@tanstack/react-query"
 import { AlertTriangle, RefreshCw } from "lucide-react"
 import { AppShell, type NavKey } from "@/components/app-shell"
 import { Button } from "@/components/ui/button"
+import { authStatus } from "@/providers/auth"
 import { useConnection } from "@/providers/context"
 import { SignInScreen } from "@/screens/connect"
 import { LoginCallback } from "@/screens/login"
@@ -60,6 +62,19 @@ class ScreenBoundary extends Component<{ children: ReactNode }, { error: Error |
   }
 }
 
+// Unclaimed install → first-run admin claim; otherwise the sign-in screen.
+function UnauthedGate() {
+  const setup = useQuery({ queryKey: ["auth-status"], queryFn: authStatus, staleTime: 0 })
+  if (setup.isLoading) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-background">
+        <span className="text-sm text-muted-foreground">Loading…</span>
+      </div>
+    )
+  }
+  return setup.data?.needsSetup ? <SetupScreen /> : <SignInScreen />
+}
+
 export function App() {
   const { connection, status } = useConnection()
   const [route, navigate] = useHashRoute()
@@ -67,7 +82,6 @@ export function App() {
   // Auth flows land on real paths (magic-link URLs survive # fragments better).
   const path = window.location.pathname
   if (path === "/login") return <LoginCallback />
-  if (path === "/setup") return <SetupScreen />
 
   if (status === "loading") {
     return (
@@ -76,7 +90,7 @@ export function App() {
       </div>
     )
   }
-  if (!connection) return <SignInScreen />
+  if (!connection) return <UnauthedGate />
 
   return (
     <AppShell active={route} onNavigate={navigate}>

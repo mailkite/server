@@ -6,6 +6,9 @@
 //   node cli.mjs add-key <user>                  → prints a new mk_local_ API key
 //   node cli.mjs add-app-password <address>      → prints a new IMAP app-password
 //   node cli.mjs list
+//   node cli.mjs reset-admin <email>             → wipes web-console admins + sessions,
+//                                                  seeds <email> (recovery if someone
+//                                                  claimed an unclaimed install first)
 //
 // DATA_DIR env selects the store (default ./data, same as the server).
 
@@ -39,6 +42,12 @@ switch (cmd) {
     console.log(store.addAppPassword(a, uid));
     break;
   }
+  case 'reset-admin': {
+    if (!a) { console.error('usage: reset-admin <email>'); process.exit(1); }
+    store.resetAdmin(a);
+    console.log(`web-console admin reset → ${a.toLowerCase()} (all sessions revoked)`);
+    break;
+  }
   case 'list': {
     for (const u of store.db.prepare('SELECT * FROM users').all()) {
       const domains = store.db.prepare('SELECT domain FROM domains WHERE user_id = ?').all(u.id).map((r) => r.domain);
@@ -49,6 +58,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.error('usage: cli.mjs add-user|add-domain|add-key|add-app-password|list …');
+    console.error('usage: cli.mjs add-user|add-domain|add-key|add-app-password|reset-admin|list …');
     process.exit(1);
 }

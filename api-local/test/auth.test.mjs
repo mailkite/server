@@ -1,10 +1,10 @@
 // Console auth: magic-link request/verify, cookie sessions + CSRF header,
-// first-boot /setup fallback, HMAC-bearer coexistence. Uses the log-delivery
+// WP-style first-run admin claim + reset-admin recovery, HMAC-bearer coexistence. Uses the log-delivery
 // fallback (no MAILKITE_SEND_KEY), reading links from the server's stdout.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -120,48 +120,60 @@ test('login tokens: expiry honored at the store level', () => {
   assert.equal(s.consumeLoginToken(good), null, 'single-use');
 });
 
-test('first boot without ADMIN_EMAIL: /setup claims the server once', async () => {
+test('setup is unavailable when ADMIN_EMAIL is configured', async () => {
+  const status = await ui('/api/auth/status');
+  assert.deepEqual(await status.json(), { needsSetup: false });
+  const claim = await ui('/api/auth/setup', { email: 'squatter@x.example' });
+  assert.equal(claim.status, 403);
+});
+
+test('unclaimed install: first email claims admin (WP-style), once; reset-admin recovers', async () => {
   const dir2 = mkdtempSync(join(tmpdir(), 'mk-setup-'));
   const PORT2 = 18792;
+  const B2 = `http://127.0.0.1:${PORT2}`;
   let out = '';
   const p2 = spawn('node', [join(dir, 'server.mjs')], {
     env: { ...process.env, DATA_DIR: dir2, HMAC_SECRET: SECRET, PORT: String(PORT2), ADMIN_EMAIL: '' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   p2.stdout.on('data', (d) => { out += d.toString(); });
+  const u2 = (path, body, extra = {}) => fetch(B2 + path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'x-mailkite-ui': '1', 'content-type': 'application/json', ...extra },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
   try {
     for (let i = 0; i < 50; i++) {
-      try { await fetch(`http://127.0.0.1:${PORT2}/api/auth/me`, { headers: { 'x-mailkite-ui': '1' } }); break; }
+      try { await u2('/api/auth/me'); break; }
       catch { await new Promise((r) => setTimeout(r, 100)); }
     }
-    const m = out.match(/setup: .*\/setup#token=(\S+)/);
-    assert.ok(m, `setup URL not logged:\n${out}`);
-    const token = m[1];
+    assert.deepEqual(await (await u2('/api/auth/status')).json(), { needsSetup: true });
 
-    const bad = await fetch(`http://127.0.0.1:${PORT2}/api/auth/setup`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token: 'mk_setup_wrong', email: 'a@b.example' }),
-    });
+    const bad = await u2('/api/auth/setup', { email: 'not-an-email' });
     assert.equal(bad.status, 400);
 
-    const ok = await fetch(`http://127.0.0.1:${PORT2}/api/auth/setup`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token, email: 'Founder@First.Example' }),
-    });
+    const ok = await u2('/api/auth/setup', { email: 'Founder@First.Example' });
     assert.equal(ok.status, 200);
     assert.equal((await ok.json()).email, 'founder@first.example');
     const c2 = ok.headers.get('set-cookie').split(';')[0];
+    assert.match(out, /web console admin claimed: founder@first\.example/);
 
-    const admin = await fetch(`http://127.0.0.1:${PORT2}/api/admin/overview`, {
-      headers: { cookie: c2, 'x-mailkite-ui': '1' },
-    });
-    assert.equal(admin.status, 200, 'setup session unlocks the console');
+    const admin = await u2('/api/admin/overview', undefined, { cookie: c2 });
+    assert.equal(admin.status, 200, 'claim session unlocks the web console');
+    assert.deepEqual(await (await u2('/api/auth/status')).json(), { needsSetup: false });
 
-    const again = await fetch(`http://127.0.0.1:${PORT2}/api/auth/setup`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ token, email: 'other@x.example' }),
-    });
-    assert.equal(again.status, 400, 'setup token is one-time');
+    const again = await u2('/api/auth/setup', { email: 'other@x.example' });
+    assert.equal(again.status, 403, 'claim is once-only');
+
+    // Recovery path: box access resets the admin and revokes every session.
+    execFileSync('node', [join(dir, 'cli.mjs'), 'reset-admin', 'Rescue@New.Example'],
+      { env: { ...process.env, DATA_DIR: dir2 } });
+    const revoked = await u2('/api/admin/overview', undefined, { cookie: c2 });
+    assert.equal(revoked.status, 401, 'squatter session revoked by reset-admin');
+    await u2('/api/auth/request-link', { email: 'rescue@new.example' });
+    const t0 = Date.now();
+    while (!/magic-link: \S+/.test(out) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
+    assert.match(out, /magic-link: \S+/, 'reset admin can request sign-in links');
   } finally {
     p2.kill();
     rmSync(dir2, { recursive: true, force: true });

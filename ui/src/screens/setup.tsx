@@ -1,5 +1,6 @@
-// /setup — first-boot claim. The server printed a one-time URL to its log;
-// whoever holds it names the first admin email and is signed straight in.
+// First-run claim (WordPress-style): while the install has no admin and no
+// ADMIN_EMAIL, the first email entered here becomes the admin and is signed
+// straight in. Recovery from a squatted claim: `cli.mjs reset-admin <email>`.
 
 import { useState, type FormEvent } from "react"
 import { useMutation } from "@tanstack/react-query"
@@ -10,16 +11,15 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { errMsg } from "@/lib/format"
-import { completeSetup, tokenFromHash } from "@/providers/auth"
+import { completeSetup } from "@/providers/auth"
 import { useConnection } from "@/providers/context"
 
 export function SetupScreen() {
   const { signedIn } = useConnection()
   const [email, setEmail] = useState("")
-  const token = tokenFromHash()
 
   const claim = useMutation({
-    mutationFn: () => completeSetup(token!, email.trim()),
+    mutationFn: () => completeSetup(email.trim()),
     onSuccess: (confirmed) => {
       window.history.replaceState({}, "", "/")
       signedIn(confirmed)
@@ -44,43 +44,40 @@ export function SetupScreen() {
         <Card className="gradient-ring panel-lift">
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
-              <ShieldCheck className="size-4 text-primary" /> Claim this server
+              <ShieldCheck className="size-4 text-primary" /> Create your admin account
             </CardTitle>
             <CardDescription>
-              {token
-                ? "You followed the one-time setup link from the server log. Enter the email that should own this web console — future sign-ins send a magic link there."
-                : "This setup URL is missing its token. Copy the full link from the server log (it starts with /setup#token=…)."}
+              This install has no admin yet — the first email entered becomes it. Future
+              sign-ins send a magic link to that address.
             </CardDescription>
           </CardHeader>
-          {token && (
-            <CardContent>
-              <form
-                onSubmit={(e: FormEvent) => {
-                  e.preventDefault()
-                  if (email.trim()) claim.mutate()
-                }}
-                className="space-y-3"
-              >
-                <div>
-                  <label htmlFor="setup-email" className="mb-1 block text-xs font-medium text-muted-foreground">
-                    Admin email
-                  </label>
-                  <Input
-                    id="setup-email"
-                    type="email"
-                    placeholder="you@yourdomain.com"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    autoComplete="email"
-                    autoFocus
-                  />
-                </div>
-                <Button type="submit" className="w-full" disabled={claim.isPending || !email.trim()}>
-                  {claim.isPending ? "Claiming…" : "Make me the admin"}
-                </Button>
-              </form>
-            </CardContent>
-          )}
+          <CardContent>
+            <form
+              onSubmit={(e: FormEvent) => {
+                e.preventDefault()
+                if (email.trim()) claim.mutate()
+              }}
+              className="space-y-3"
+            >
+              <div>
+                <label htmlFor="setup-email" className="mb-1 block text-xs font-medium text-muted-foreground">
+                  Admin email
+                </label>
+                <Input
+                  id="setup-email"
+                  type="email"
+                  placeholder="you@yourdomain.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="email"
+                  autoFocus
+                />
+              </div>
+              <Button type="submit" className="w-full" disabled={claim.isPending || !email.trim()}>
+                {claim.isPending ? "Creating…" : "Create admin account"}
+              </Button>
+            </form>
+          </CardContent>
         </Card>
       </div>
     </div>

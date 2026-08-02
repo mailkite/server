@@ -151,6 +151,12 @@ export class Store {
       .get(String(email || '').toLowerCase());
   }
   adminUserCount() { return this.db.prepare('SELECT COUNT(*) c FROM admin_users').get().c; }
+  /** Recovery from a squatted first-visitor claim: wipe admins + sessions, seed anew. */
+  resetAdmin(email) {
+    this.db.prepare('DELETE FROM admin_users').run();
+    this.db.prepare('DELETE FROM sessions').run();
+    this.addAdminUser(email);
+  }
 
   createLoginToken(email, ttlMs = 15 * 60 * 1000) {
     const raw = 'mk_login_' + randomBytes(24).toString('base64url');

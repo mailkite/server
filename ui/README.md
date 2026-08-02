@@ -22,12 +22,14 @@ npm run dev
 ```
 
 Open the backend's URL and sign in with your admin email — a one-time **magic link**
-arrives by email (or in the server log if sending isn't configured yet).
+arrives by email (or in the server log if sending isn't configured yet). A fresh
+install with no admin shows **Create your admin account** instead — the first email
+entered claims it (recoverable via `cli.mjs reset-admin`).
 
 ## Auth model
 
 Default is **magic-link sign-in**: enter an allowed admin email (`ADMIN_EMAIL` env, the
-/setup first-boot claim, or an invited admin), click the emailed link, and the browser
+first-run claim, or an invited admin), click the emailed link, and the browser
 holds an **httpOnly session cookie** (30-day rolling; hashed server-side; `Secure` under
 TLS; a custom `x-mailkite-ui` header doubles as the CSRF gate). Nothing sensitive lives
 in `localStorage`, and sign-out revokes the session server-side.
