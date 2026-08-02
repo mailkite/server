@@ -48,7 +48,7 @@ export function SetupScreen() {
             </CardTitle>
             <CardDescription>
               {token
-                ? "You followed the one-time setup link from the server log. Enter the email that should own this console — future sign-ins send a magic link there."
+                ? "You followed the one-time setup link from the server log. Enter the email that should own this web console — future sign-ins send a magic link there."
                 : "This setup URL is missing its token. Copy the full link from the server log (it starts with /setup#token=…)."}
             </CardDescription>
           </CardHeader>

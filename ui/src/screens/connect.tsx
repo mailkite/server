@@ -1,4 +1,4 @@
-// Sign in — the console's front door. Default: email → magic link (no secrets
+// Sign in — the web console's front door. Default: email → magic link (no secrets
 // to paste or store). Advanced: the old admin-secret path for scripted or
 // loopback setups. Cloud: honest coming-soon card that routes to MailKite Cloud.
 
@@ -169,7 +169,7 @@ export function SignInScreen() {
           <CardContent className="flex items-center justify-between gap-3 p-4">
             <div className="min-w-0">
               <div className="text-sm font-medium">
-                MailKite Cloud <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">Console support coming soon</span>
+                MailKite Cloud <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">web console support coming soon</span>
               </div>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 Skip the mail server entirely — hosted inbound, deliverability, and webhooks.

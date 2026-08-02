@@ -48,7 +48,7 @@ MX edge). Hosted variants: [`../deploy/fly.md`](../deploy/fly.md) ·
 [`../deploy/railway.md`](../deploy/railway.md). One replica only — SQLite is
 single-writer; `/data` is the database, back it up.
 
-## Console auth (magic link)
+## Web console auth (magic link)
 
 The web console signs in with **email magic links**, not the HMAC secret:
 
@@ -60,7 +60,7 @@ The web console signs in with **email magic links**, not the HMAC secret:
 
 **First boot with no `ADMIN_EMAIL` and no admins on record** prints a one-time
 `/setup#token=…` URL to the log — the WordPress-install pattern: possession of the
-server console is the root credential, and whoever opens that URL names the first
+server web console is the root credential, and whoever opens that URL names the first
 admin. The token dies on use (or on restart once an admin exists).
 
 Sessions are httpOnly cookies (`mk_session`, 30-day rolling), stored **hashed** in
