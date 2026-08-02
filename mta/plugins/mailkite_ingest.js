@@ -3,12 +3,17 @@
 // mailkite_ingest — the entire business logic of the MX edge.
 //
 // On Haraka's `queue` hook, stream the accepted message's raw RFC822 bytes and POST
-// them (HMAC-signed) to the MailKite Worker's `POST /api/ingest`. Everything else —
-// MIME parsing, storage (D1+R2), route matching, webhook signing/delivery — lives in
-// the Worker (api/), so this edge stays a dumb SMTP→HTTP pipe.
+// them (HMAC-signed) to the backend's `POST /api/ingest`. Everything else — MIME
+// parsing, storage, route matching, webhook delivery — lives behind the backend
+// contract, so this edge stays a dumb SMTP→HTTP pipe.
 //
-// On any non-2xx or network error we return DENYSOFT: the sender retries later and
-// Haraka holds the message, so a brief ingest outage never loses mail.
+// Multi-backend (config/backends.json, spec: docs/multi-backend.md): recipients are
+// grouped by the backend that claimed their domain at RCPT time (mailkite_rcpt records
+// it on txn.notes); the raw message is POSTed once per owning backend — that backend's
+// secret signs it and x-mailkite-rcpt carries only its recipients. All groups 2xx →
+// OK; any failure → DENYSOFT (the sender retries; backends must dedupe on retry — the
+// reference backend does). Without backends.json the plugin is byte-identical to the
+// original single-backend behavior, including the MAILKITE_INGEST_URL override.
 //
 // Config (config/mailkite.ini, with env overrides so secrets never touch disk):
 //   [main]
@@ -18,7 +23,9 @@
 // Env overrides: MAILKITE_INGEST_URL, MAILKITE_HMAC_SECRET, MAILKITE_INGEST_TIMEOUT_MS
 
 const crypto = require('crypto');
+const path = require('path');
 const { Writable } = require('stream');
+const { parseBackendsConfig, getSharedRouter } = require(path.join(__dirname, '..', 'lib', 'backends.js'));
 
 exports.register = function () {
   this.load_mailkite_ini();
@@ -34,15 +41,19 @@ exports.load_mailkite_ini = function () {
   this.ingest_url = process.env.MAILKITE_INGEST_URL || main.ingest_url;
   this.hmac_secret = process.env.MAILKITE_HMAC_SECRET || main.hmac_secret;
   this.timeout_ms = Number(process.env.MAILKITE_INGEST_TIMEOUT_MS || main.timeout_ms) || 10000;
-  if (!this.ingest_url) this.logerror('mailkite_ingest: no ingest_url configured');
-  if (!this.hmac_secret) this.logerror('mailkite_ingest: no hmac_secret configured');
+  const plugin = this;
+  const log = { info: (m) => plugin.loginfo(m), warn: (m) => plugin.logwarn(m), error: (m) => plugin.logerror(m) };
+  const raw = this.config.get('backends.json', () => this.load_mailkite_ini());
+  this.backends = parseBackendsConfig(raw, process.env, log);
+  if (!this.backends.length && !this.ingest_url) this.logerror('mailkite_ingest: no ingest_url configured');
+  if (!this.backends.length && !this.hmac_secret) this.logerror('mailkite_ingest: no hmac_secret configured');
 };
 
 exports.hook_queue = function (next, connection) {
   const plugin = this;
   const txn = connection && connection.transaction;
   if (!txn) return next(DENYSOFT, 'no transaction');
-  if (!plugin.ingest_url || !plugin.hmac_secret) {
+  if (!plugin.backends.length && (!plugin.ingest_url || !plugin.hmac_secret)) {
     return next(DENYSOFT, 'ingest not configured');
   }
 
@@ -96,14 +107,42 @@ exports.read_verdicts = function (connection, txn) {
   return v;
 };
 
+// Group envelope recipients into per-backend delivery targets:
+//   [{name, url (ingest endpoint), secret, rcpts: [addr,…]}]
+// Single-backend mode returns exactly one target using ingest_url/hmac_secret, which
+// keeps the request byte-identical to the pre-multi-backend plugin.
+exports.delivery_targets = function (txn, rcpts) {
+  const plugin = this;
+  if (!plugin.backends.length) {
+    return [{ name: 'default', url: plugin.ingest_url, secret: plugin.hmac_secret, rcpts }];
+  }
+  const byName = new Map(plugin.backends.map((b) => [b.name, b]));
+  const noted = (txn && txn.notes && txn.notes.mailkite_backend_by_addr) || {};
+  const router = getSharedRouter();
+  const targets = new Map();
+  const add = (backend, addr) => {
+    if (!targets.has(backend.name)) {
+      targets.set(backend.name, { name: backend.name, url: backend.ingestUrl, secret: backend.secret, rcpts: [] });
+    }
+    targets.get(backend.name).rcpts.push(addr);
+  };
+  for (const addr of rcpts) {
+    let backend = byName.get(noted[addr]);
+    if (!backend && router) backend = router.ownerOf(String(addr).split('@')[1] || '') || undefined;
+    if (!backend) {
+      // RCPT accepted it but no owner is resolvable now (e.g. cache turnover between
+      // RCPT and DATA). Highest-priority backend is the least-wrong home.
+      backend = plugin.backends[0];
+      plugin.logwarn(`mailkite_ingest: no owner resolved for ${addr} — using "${backend.name}"`);
+    }
+    add(backend, addr);
+  }
+  return [...targets.values()];
+};
+
 exports.post_to_ingest = function (connection, txn, raw, next) {
   const plugin = this;
   const ts = Math.floor(Date.now() / 1000);
-  // HMAC-SHA256(secret, `${ts}.` ++ raw) — matches verifyIngestSignature() in api/.
-  const sig = crypto.createHmac('sha256', plugin.hmac_secret)
-    .update(`${ts}.`)
-    .update(raw)
-    .digest('hex');
 
   // Haraka Address: .address may be a method or a string depending on version.
   const addrStr = (a) => {
@@ -112,22 +151,11 @@ exports.post_to_ingest = function (connection, txn, raw, next) {
     if (typeof a.address === 'string') return a.address;
     return String(a);
   };
-  const rcpts = (txn.rcpt_to || []).map(addrStr).join(',');
+  const rcpts = (txn.rcpt_to || []).map(addrStr).filter(Boolean);
   const mailfrom = addrStr(txn.mail_from);
+  const verdicts = plugin.read_verdicts(connection, txn);
 
-  const headers = {
-    'content-type': 'message/rfc822',
-    'x-mailkite-signature': `t=${ts},v1=${sig}`,
-    'x-mailkite-rcpt': rcpts,
-    'x-mailkite-mailfrom': mailfrom,
-  };
-  // Attach edge verdicts when present (the Worker reads these into the message row).
-  const v = plugin.read_verdicts(connection, txn);
-  if (v.spf) headers['x-mailkite-spf'] = v.spf;
-  if (v.dkim) headers['x-mailkite-dkim'] = v.dkim;
-  if (v.dmarc) headers['x-mailkite-dmarc'] = v.dmarc;
-  if (v.spam) headers['x-mailkite-spam'] = v.spam;
-  if (v.spamVerdict) headers['x-mailkite-spam-verdict'] = v.spamVerdict;
+  const targets = plugin.delivery_targets(txn, rcpts);
 
   // Timeout via a settled-guard (AbortController isn't exposed in Haraka's plugin VM).
   let settled = false;
@@ -142,17 +170,41 @@ exports.post_to_ingest = function (connection, txn, raw, next) {
     finish(DENYSOFT, 'temporary ingest failure, please retry');
   }, plugin.timeout_ms);
 
-  fetch(plugin.ingest_url, { method: 'POST', headers, body: raw })
-    .then((res) => {
+  const postOne = (t) => {
+    // HMAC-SHA256(secret, `${ts}.` ++ raw) — matches verifyIngestSignature() in the backend.
+    const sig = crypto.createHmac('sha256', t.secret)
+      .update(`${ts}.`)
+      .update(raw)
+      .digest('hex');
+    const headers = {
+      'content-type': 'message/rfc822',
+      'x-mailkite-signature': `t=${ts},v1=${sig}`,
+      'x-mailkite-rcpt': t.rcpts.join(','),
+      'x-mailkite-mailfrom': mailfrom,
+    };
+    if (verdicts.spf) headers['x-mailkite-spf'] = verdicts.spf;
+    if (verdicts.dkim) headers['x-mailkite-dkim'] = verdicts.dkim;
+    if (verdicts.dmarc) headers['x-mailkite-dmarc'] = verdicts.dmarc;
+    if (verdicts.spam) headers['x-mailkite-spam'] = verdicts.spam;
+    if (verdicts.spamVerdict) headers['x-mailkite-spam-verdict'] = verdicts.spamVerdict;
+
+    return fetch(t.url, { method: 'POST', headers, body: raw }).then((res) => {
       if (res.ok) {
-        plugin.loginfo(`mailkite_ingest: accepted ${rcpts} (${raw.length}b) → ${res.status}`);
-        return finish(OK); // Haraka marks the message delivered
+        plugin.loginfo(`mailkite_ingest: ${t.name}: accepted ${t.rcpts.join(',')} (${raw.length}b) → ${res.status}`);
+        return true;
       }
-      plugin.logerror(`mailkite_ingest: ingest ${res.status} for ${rcpts}`);
+      plugin.logerror(`mailkite_ingest: ${t.name}: ingest ${res.status} for ${t.rcpts.join(',')}`);
+      return false;
+    }).catch((e) => {
+      plugin.logerror(`mailkite_ingest: ${t.name}: ${e.message}`);
+      return false;
+    });
+  };
+
+  Promise.all(targets.map(postOne))
+    .then((oks) => {
+      if (oks.every(Boolean)) return finish(OK); // Haraka marks the message delivered
       return finish(DENYSOFT, 'temporary ingest failure, please retry');
     })
-    .catch((e) => {
-      plugin.logerror(`mailkite_ingest: ${e.message}`);
-      return finish(DENYSOFT, 'temporary ingest failure, please retry');
-    });
+    .catch(() => finish(DENYSOFT, 'temporary ingest failure, please retry'));
 };

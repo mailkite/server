@@ -148,6 +148,16 @@ export class Store {
     try { return readFileSync(join(this.dataDir, 'blobs', name)); } catch { return null; }
   }
 
+  /** Content hash of a raw message — the blobs/ filename putBlob() will use. */
+  static hashRaw(raw) { return createHash('sha256').update(raw).digest('hex'); }
+
+  /** Ingest idempotency: has this exact message already been stored for this recipient? */
+  messageExists(userId, mailbox, blob, rcpt) {
+    return !!this.db.prepare(
+      'SELECT 1 FROM messages WHERE user_id = ? AND mailbox = ? AND blob = ? AND rcpt = ? LIMIT 1')
+      .get(userId, mailbox, blob, rcpt);
+  }
+
   storeMessage(userId, mailbox, raw, meta) {
     const box = this.mailbox(userId, mailbox);
     const uid = box.uidnext;

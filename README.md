@@ -25,7 +25,9 @@ Every component is a dumb protocol head. State lives behind a handful of HMAC-au
 HTTP endpoints (`/api/imap/{auth,status,list,flags,raw}`, an inbound ingest hook, and a
 submission inject endpoint). Implement that contract over any store and every edge here
 works unchanged — the reference SQLite backend and MailKite Cloud are just two
-implementations of it. See [`docs/contract.md`](docs/contract.md); the conformance suite
+implementations of it. One MX edge can even serve **several backends at once**, routing
+each recipient domain to its owner — see [`docs/multi-backend.md`](docs/multi-backend.md).
+See [`docs/contract.md`](docs/contract.md); the conformance suite
 in `backend-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
 full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
 

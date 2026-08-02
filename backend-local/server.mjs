@@ -64,9 +64,14 @@ const routes = {
     const rcpts = String(req.headers['x-mailkite-rcpt'] || '').split(',').map((s) => s.trim()).filter(Boolean);
     if (!rcpts.length) return json(res, 400, { error: 'no recipients', code: 'no_rcpt' });
     let stored = 0;
+    let deduped = 0;
+    // Idempotent by (recipient, mailbox, content hash): a multi-backend edge tempfailing
+    // on a sibling backend makes the sender retry — the re-delivery must not duplicate.
+    const blobSha = Store.hashRaw(raw);
     for (const rcpt of rcpts) {
       const userId = store.userForDomain(rcpt.split('@')[1] || '');
       if (userId == null) continue; // not ours; RCPT gating should have caught it
+      if (store.messageExists(userId, 'INBOX', blobSha, rcpt)) { deduped++; continue; }
       store.storeMessage(userId, 'INBOX', raw, metaFrom(raw, {
         to_addr: rcpt,
         mailfrom: req.headers['x-mailkite-mailfrom'] || '',
@@ -77,7 +82,7 @@ const routes = {
       }));
       stored++;
     }
-    return json(res, 200, { ok: true, stored });
+    return json(res, 200, { ok: true, stored, deduped });
   },
 
   'GET /api/mx/accepted-domains': async (req, res) => {

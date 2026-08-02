@@ -7,7 +7,8 @@
     "start": "haraka -c .",
     "dev": "haraka -c .",
     "sync-host-list": "node scripts/sync-host-list.mjs",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --test 'test/*.test.mjs'"
   },
   "dependencies": {
     "Haraka": "^3.3.1"

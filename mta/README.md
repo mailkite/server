@@ -64,6 +64,24 @@ configured by `config/tls.ini`, and reads `config/tls/tls_cert.pem` +
 prefer DNS-01 so nothing needs port 80 and renewals don't require downtime). Add a certbot
 `--deploy-hook` that re-copies the cert into `config/tls/` and restarts the daemon.
 
+## Multi-backend routing (optional)
+
+One MX can serve several backends at once — each recipient domain is routed to the
+backend that claims it (spec: [`../docs/multi-backend.md`](../docs/multi-backend.md)).
+Drop a `config/backends.json` (order = priority; secrets stay in env):
+
+```json
+{
+  "backends": [
+    { "name": "cloud", "url": "https://api.mailkite.dev",    "secretEnv": "MAILKITE_HMAC_SECRET" },
+    { "name": "demo",  "url": "https://server.mailkite.dev", "secretEnv": "MAILKITE_DEMO_SECRET" }
+  ]
+}
+```
+
+Without the file, behavior is identical to single-backend mode below. Routing logic
+lives in `lib/backends.js`; `npm test` covers it without installing Haraka.
+
 ## Secrets & config
 
 | Name | Where | Purpose |
