@@ -4,16 +4,18 @@
 // Implements: /api/ingest, /api/mx/accepted-domains, /api/smtp/auth, /api/relay,
 // /api/imap/{auth,status,list,flags,raw}.
 //
-// Outbound scope (v1): /api/relay stores to Sent and loop-delivers to local domains.
-// It does NOT deliver to the open internet — wire a smarthost or MailKite Cloud for
-// real outbound (see README).
+// Outbound: /api/relay stores to Sent, loop-delivers to locally-hosted domains, and
+// hands everyone else to the smarthost named by SMARTHOST (see lib/smarthost.mjs).
+// Unset SMARTHOST → external recipients are skipped and logged.
 //
-// Env: HMAC_SECRET (required), PORT (8787), HOST (127.0.0.1), DATA_DIR (./data)
+// Env: HMAC_SECRET (required), PORT (8787), HOST (127.0.0.1), DATA_DIR (./data),
+//      SMARTHOST (cloud | smtp[s]://user:pass@host:port), MAILKITE_SEND_KEY
 
 import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
+import { parseSmarthost, relayExternal } from './lib/smarthost.mjs';
 
 const SECRET = process.env.HMAC_SECRET || '';
 const PORT = Number(process.env.PORT || 8787);
@@ -25,6 +27,8 @@ const DRIFT_S = 5 * 60;
 if (!SECRET) { console.error('api-local: HMAC_SECRET is required'); process.exit(1); }
 
 const store = new Store(DATA_DIR);
+// Outbound to recipients we don't host: cloud relay, an SMTP smarthost, or nothing.
+const SMARTHOST = parseSmarthost();
 
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = []; let n = 0;
@@ -163,14 +167,35 @@ const routes = {
     if (!rcpts.length) return json(res, 400, { error: 'no recipients', code: 'no_rcpt' });
     store.storeMessage(userId, 'Sent', raw, { ...meta, flags: 'Seen', rcpt: rcpts.join(',') });
     // Loop-delivery: recipients on locally-hosted domains land in their INBOX.
+    const externalRcpts = [];
     let local = 0;
     for (const rcpt of rcpts) {
       const rcptUser = store.userForDomain(rcpt.split('@')[1] || '');
       if (rcptUser != null) { store.storeMessage(rcptUser, 'INBOX', raw, metaFrom(raw, { to_addr: rcpt, mailfrom: meta.from_addr, rcpt })); local++; }
+      else externalRcpts.push(rcpt);
     }
-    const external = rcpts.length - local;
-    if (external > 0) console.warn(`relay: ${external} external recipient(s) NOT delivered (no smarthost in v1)`);
-    return json(res, 200, { ok: true, localDelivered: local, externalSkipped: external });
+    // Everyone else goes out through the smarthost, if one is configured.
+    let relayed = 0;
+    if (externalRcpts.length && SMARTHOST) {
+      try {
+        ({ relayed } = await relayExternal(SMARTHOST, raw, externalRcpts, meta.from_addr));
+        console.log(`relay: ${relayed} external recipient(s) via ${SMARTHOST.mode} smarthost`);
+      } catch (e) {
+        // The Sent copy is already stored; report the failure so the SMTP edge
+        // tempfails and the client retries rather than silently losing the mail.
+        console.error(`relay: smarthost (${SMARTHOST.mode}) failed — ${e.message}`);
+        return json(res, 502, { error: `smarthost delivery failed: ${e.message}`, code: 'smarthost_failed', localDelivered: local });
+      }
+    } else if (externalRcpts.length) {
+      console.warn(`relay: ${externalRcpts.length} external recipient(s) NOT delivered (no SMARTHOST configured)`);
+    }
+    return json(res, 200, {
+      ok: true,
+      localDelivered: local,
+      externalSkipped: SMARTHOST ? 0 : externalRcpts.length,
+      smarthost: SMARTHOST ? SMARTHOST.mode : null,
+      relayed,
+    });
   },
 
   // ---- IMAP read API -----------------------------------------------------------

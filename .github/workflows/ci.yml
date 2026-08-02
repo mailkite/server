@@ -55,3 +55,17 @@ jobs:
         working-directory: mta-submit
       - run: npm test
         working-directory: mta-submit
+
+  haraka-plugin-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Sync check + smoke tests (zero-dep — Haraka not installed)
+        run: npm test
+        working-directory: packages/haraka-plugin-mailkite
+      - name: Pack dry-run (publish readiness)
+        run: npm pack --dry-run
+        working-directory: packages/haraka-plugin-mailkite

@@ -1,0 +1,40 @@
+{
+  "name": "haraka-plugin-mailkite",
+  "version": "0.1.0",
+  "description": "Connect an existing Haraka MX or submission server to a MailKite-contract backend (MailKite Cloud or self-hosted api-local): inbound mail as signed webhooks, anti-open-relay RCPT checks, SMTP AUTH + relay.",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "plugins/",
+    "lib/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "sync": "node scripts/sync.mjs",
+    "test": "node scripts/sync.mjs --check && node --test 'test/*.test.mjs'",
+    "prepack": "node scripts/sync.mjs --check"
+  },
+  "keywords": [
+    "haraka",
+    "haraka-plugin",
+    "smtp",
+    "mx",
+    "email",
+    "inbound-email",
+    "webhook",
+    "mailkite",
+    "email-api"
+  ],
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mailkite/server.git",
+    "directory": "packages/haraka-plugin-mailkite"
+  },
+  "homepage": "https://github.com/mailkite/server/tree/main/packages/haraka-plugin-mailkite#readme",
+  "bugs": "https://github.com/mailkite/server/issues",
+  "engines": {
+    "node": ">=18"
+  }
+}
