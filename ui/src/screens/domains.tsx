@@ -37,11 +37,23 @@ function DnsRecords({ domain }: { domain: string }) {
         deliverability suffers without it.
       </p>
       <div className="grid gap-2">
+        <ValueRow label={`A — ${mailHost}`} value="<this server's public IP>" />
         <ValueRow label={`MX — ${domain}`} value={`10 ${mailHost}`} />
         <ValueRow label={`TXT (SPF) — ${domain}`} value={`v=spf1 a:${mailHost} -all`} />
         <ValueRow label={`TXT (DMARC) — _dmarc.${domain}`} value={`v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}`} />
-        <ValueRow label="IMAP host (clients + agents)" value={mailHost} />
-        <ValueRow label="SMTP submission host" value={`${mailHost}:587`} />
+      </div>
+
+      <div className="mt-4 space-y-2 rounded-md border border-border bg-accent/20 p-3">
+        <p className="text-xs font-medium">Connect clients &amp; agents</p>
+        <p className="text-xs text-muted-foreground">
+          Not DNS — this is where mail apps and agents sign in once the records above resolve.
+          Username is a full address on <code className="font-mono">{domain}</code>; passwords come
+          from the Credentials screen.
+        </p>
+        <div className="grid gap-2">
+          <ValueRow label="IMAP (read mail) — SSL/TLS" value={`${mailHost}:993`} />
+          <ValueRow label="SMTP submission (send) — STARTTLS" value={`${mailHost}:587`} />
+        </div>
       </div>
     </div>
   )
