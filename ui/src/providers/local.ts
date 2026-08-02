@@ -14,6 +14,8 @@ import {
   type Mailbox,
   type MessagePage,
   type Overview,
+  type WebhookConfig,
+  type WebhookStatus,
 } from "./types"
 
 export type LocalConfig = { baseUrl: string; secret?: string }
@@ -85,6 +87,22 @@ export class LocalProvider implements MailProvider {
     return password
   }
 
-  /** v1 has no webhook config surface — capabilities() already reports it. */
+  async webhooks(): Promise<WebhookConfig[]> {
+    const { webhooks } = await (await this.call("/api/admin/domains/webhook")).json()
+    return webhooks
+  }
+  async webhook(domain: string): Promise<WebhookConfig> {
+    return (await this.call(`/api/admin/domains/webhook?domain=${encodeURIComponent(domain)}`)).json()
+  }
+  async setWebhook(domain: string, url: string): Promise<WebhookConfig> {
+    return (
+      await this.call("/api/admin/domains/webhook", { method: "POST", body: JSON.stringify({ domain, url }) })
+    ).json()
+  }
+  async webhookStatus(domain?: string): Promise<WebhookStatus> {
+    const q = domain ? `?domain=${encodeURIComponent(domain)}` : ""
+    return (await this.call(`/api/admin/domains/webhook-status${q}`)).json()
+  }
+
   static readonly notImplemented = NotImplemented
 }

@@ -16,6 +16,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
 import { parseSmarthost, relayExternal } from './lib/smarthost.mjs';
+import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
 
 const SECRET = process.env.HMAC_SECRET || '';
 const PORT = Number(process.env.PORT || 8787);
@@ -119,14 +120,17 @@ const routes = {
     if (!rcpts.length) return json(res, 400, { error: 'no recipients', code: 'no_rcpt' });
     let stored = 0;
     let deduped = 0;
+    let queued = 0;
     // Idempotent by (recipient, mailbox, content hash): a multi-backend edge tempfailing
     // on a sibling backend makes the sender retry — the re-delivery must not duplicate.
     const blobSha = Store.hashRaw(raw);
+    const meta0 = metaFrom(raw);
     for (const rcpt of rcpts) {
-      const userId = store.userForDomain(rcpt.split('@')[1] || '');
+      const domain = (rcpt.split('@')[1] || '').toLowerCase();
+      const userId = store.userForDomain(domain);
       if (userId == null) continue; // not ours; RCPT gating should have caught it
       if (store.messageExists(userId, 'INBOX', blobSha, rcpt)) { deduped++; continue; }
-      store.storeMessage(userId, 'INBOX', raw, metaFrom(raw, {
+      const uid = store.storeMessage(userId, 'INBOX', raw, metaFrom(raw, {
         to_addr: rcpt,
         mailfrom: req.headers['x-mailkite-mailfrom'] || '',
         rcpt: rcpt,
@@ -135,8 +139,21 @@ const routes = {
         spam_verdict: req.headers['x-mailkite-spam-verdict'],
       }));
       stored++;
+      // Store first, then queue: the message is safe even if dispatch never succeeds.
+      const hook = store.webhook(domain);
+      if (hook) {
+        store.queueDelivery(domain, hook.url, buildPayload({
+          domain, rcpt, uid,
+          mailfrom: req.headers['x-mailkite-mailfrom'] || '',
+          from: meta0.from_addr, subject: meta0.subject,
+          baseUrl: `${scheme}://${req.headers.host || ''}`,
+        }));
+        queued++;
+      }
     }
-    return json(res, 200, { ok: true, stored, deduped });
+    // Fire the queue now (don't await — the edge's 2xx shouldn't wait on a receiver).
+    if (queued) runDue(store).catch((e) => console.error('webhook dispatch:', e.message));
+    return json(res, 200, { ok: true, stored, deduped, webhooksQueued: queued });
   },
 
   'GET /api/mx/accepted-domains': async (req, res) => {
@@ -305,7 +322,14 @@ Object.assign(routes, {
       domains: store.domains().length,
       inbox: store.status(u, 'INBOX'),
       sent: store.status(u, 'Sent'),
-      capabilities: { inbound: true, imap: true, outboundLocal: true, outboundInternet: false, webhooks: false, routes: false },
+      capabilities: {
+        inbound: true,
+        imap: true,
+        outboundLocal: true,
+        outboundInternet: !!SMARTHOST,   // true once a smarthost is configured
+        webhooks: true,                  // configurable per domain (may be unset)
+        routes: false,
+      },
     });
   },
   'GET /api/admin/domains': async (req, res) => {
@@ -319,6 +343,41 @@ Object.assign(routes, {
     store.addDomain(domain, store.defaultUser());
     return json(res, 200, { ok: true, domain: domain.toLowerCase() });
   },
+  // Webhook config, one target per domain. GET lists every configured hook; POST
+  // sets or clears one (empty url = clear) and returns the signing secret so it can
+  // be copied into the receiver.
+  'GET /api/admin/domains/webhook': async (req, res) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    const one = q.get('domain');
+    if (one) {
+      const hook = store.webhook(one);
+      return json(res, 200, { domain: one.toLowerCase(), url: hook?.url || null, secret: hook?.secret || null });
+    }
+    return json(res, 200, { webhooks: store.webhooks() });
+  },
+  'POST /api/admin/domains/webhook': async (req, res, raw) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const { domain, url } = JSON.parse(raw.toString() || '{}');
+    if (!domain || !store.domains().includes(String(domain).toLowerCase())) {
+      return json(res, 400, { error: `domain not hosted here: ${domain || '(none)'}`, code: 'bad_domain' });
+    }
+    if (url) {
+      let u;
+      try { u = new URL(url); } catch { return json(res, 400, { error: 'Enter a valid URL.', code: 'bad_url' }); }
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+        return json(res, 400, { error: 'Webhook URL must be http(s).', code: 'bad_url' });
+      }
+    }
+    const saved = store.setWebhook(domain, url || null);
+    return json(res, 200, { ok: true, domain: String(domain).toLowerCase(), ...saved });
+  },
+  'GET /api/admin/domains/webhook-status': async (req, res) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    return json(res, 200, store.deliveryStatus(q.get('domain'), Math.min(Number(q.get('limit')) || 20, 100)));
+  },
+
   'GET /api/admin/credentials': async (req, res) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const u = store.defaultUser();
@@ -405,6 +464,9 @@ if (TLS_CERT && TLS_KEY) {
   server = createServer(handle);
   scheme = 'http';
 }
+
+// Retry scanner for webhook deliveries that didn't land on the first try.
+startScanner(store, Number(process.env.WEBHOOK_SCAN_MS || 30_000));
 
 server.listen(PORT, HOST, () => {
   console.log(`api-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);

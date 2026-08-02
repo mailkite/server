@@ -40,8 +40,10 @@ test('admin endpoints require the edge bearer', async () => {
 test('overview reports capabilities honestly', async () => {
   const o = await (await admin('/api/admin/overview')).json();
   assert.equal(o.capabilities.inbound, true);
-  assert.equal(o.capabilities.outboundInternet, false, 'v1 must not claim internet outbound');
-  assert.equal(o.capabilities.webhooks, false);
+  assert.equal(o.capabilities.webhooks, true, 'webhook dispatch ships in api-local');
+  // This instance runs without SMARTHOST, so it must not claim internet outbound.
+  assert.equal(o.capabilities.outboundInternet, false);
+  assert.equal(o.capabilities.routes, false, 'no per-address routing rules yet');
 });
 
 test('domain add/list, validation, and credential issuance', async () => {

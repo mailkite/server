@@ -121,8 +121,51 @@ so a retry can duplicate it; that's the deliberate trade against losing the mess
 Credentials in a URL land in `ps` output and shell history; prefer an env file
 (`EnvironmentFile=` in systemd, `env_file:` in compose).
 
+## Inbound webhooks
+
+Set one target per domain (web console → **Webhooks**, or the admin API) and every
+inbound message for that domain is POSTed to it:
+
+```sh
+curl -X POST localhost:8787/api/admin/domains/webhook \
+  -H "authorization: Bearer $HMAC_SECRET" -H 'content-type: application/json' \
+  -d '{"domain":"yourdomain.com","url":"https://your-app.example/inbound"}'
+# → {"ok":true,"domain":"yourdomain.com","url":"…","secret":"whsec_…"}
+```
+
+```jsonc
+// POST body
+{
+  "event": "inbound",
+  "domain": "yourdomain.com",
+  "rcpt": "you@yourdomain.com",
+  "mailfrom": "sender@far.example",   // envelope
+  "from": "Alice <alice@far.example>", // header
+  "subject": "hello",
+  "uid": 42,
+  "receivedAt": "2026-08-02T12:00:00.000Z",
+  "raw_url": "https://…/api/admin/raw?mailbox=INBOX&uid=42"  // full RFC822, admin-auth
+}
+```
+
+- **Signed** with the domain's `whsec_…`: `x-mailkite-signature: t=<unix>,v1=<hex>` where
+  the hex is `HMAC-SHA256(secret, "<t>." + body)` — the same scheme the edges use for
+  ingest. Verify over the exact body bytes.
+- **Metadata, not the whole message.** Receivers mostly route on headers; posting
+  multi-MB bodies at a flaky endpoint is how retry storms start. Fetch `raw_url` when
+  you need the full message.
+- **Store first, then dispatch.** Mail is never lost because a receiver is down — the
+  SMTP transaction doesn't wait on your endpoint.
+- **Retries:** 5 attempts at 1m / 5m / 30m / 30m backoff, tracked in a `deliveries`
+  table (survives restarts). Any 2xx is success. `GET /api/admin/domains/webhook-status`
+  reports recent attempts and counts; the web console shows the same.
+- The signing secret is generated with the first URL and stays stable across URL edits,
+  so receivers don't have to re-key.
+
 ## v1 scope — honest limits
 
+- **No inbound routing rules.** One webhook per domain — no per-address routes or
+  filters (`routes` stays false in `capabilities`).
 - **Single process, single SQLite file.** Right-sized for a personal/app mailbox volume,
   not a mail farm.
 - IMAP brute-force lockout is per-IP (20 fails / 15 min), mirroring the cloud's

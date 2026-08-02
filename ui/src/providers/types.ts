@@ -35,6 +35,25 @@ export type Overview = {
   capabilities: Capabilities
 }
 
+export type WebhookConfig = { domain: string; url: string | null; secret?: string | null }
+
+export type Delivery = {
+  id: number
+  domain: string
+  url: string
+  status: "pending" | "delivered" | "failed"
+  attempts: number
+  next_attempt: number
+  last_error: string | null
+  created: number
+  updated: number
+}
+
+export type WebhookStatus = {
+  recent: Delivery[]
+  counts: { pending: number; delivered: number; failed: number }
+}
+
 export interface MailProvider {
   /** Short label for the header ("Local server", "MailKite Cloud"). */
   readonly name: string
@@ -47,6 +66,12 @@ export interface MailProvider {
   credentials(): Promise<{ apiKeys: string[]; appPasswords: string[] }>
   createKey(): Promise<string>
   createAppPassword(username: string): Promise<string>
+  /** Inbound webhook config — one target per domain. */
+  webhooks(): Promise<WebhookConfig[]>
+  webhook(domain: string): Promise<WebhookConfig>
+  /** Empty url clears the webhook. Returns the (stable) signing secret when set. */
+  setWebhook(domain: string, url: string): Promise<WebhookConfig>
+  webhookStatus(domain?: string): Promise<WebhookStatus>
 }
 
 export class ProviderError extends Error {

@@ -9,6 +9,8 @@ import {
   type MailProvider,
   type MessagePage,
   type Overview,
+  type WebhookConfig,
+  type WebhookStatus,
 } from "./types"
 
 export class CloudProvider implements MailProvider {
@@ -40,6 +42,18 @@ export class CloudProvider implements MailProvider {
     throw new NotImplemented("MailKite Cloud connection")
   }
   async createAppPassword(): Promise<string> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async webhooks(): Promise<WebhookConfig[]> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async webhook(): Promise<WebhookConfig> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async setWebhook(): Promise<WebhookConfig> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async webhookStatus(): Promise<WebhookStatus> {
     throw new NotImplemented("MailKite Cloud connection")
   }
 }

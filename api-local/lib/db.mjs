@@ -14,8 +14,23 @@ const SCHEMA = `
   );
   CREATE TABLE IF NOT EXISTS domains (
     domain TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL REFERENCES users(id)
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    webhook_url TEXT,                    -- inbound dispatch target (null = no webhook)
+    webhook_secret TEXT                  -- signs the payload; generated with the URL
   );
+  CREATE TABLE IF NOT EXISTS deliveries (  -- webhook attempts, retried by the scanner
+    id INTEGER PRIMARY KEY,
+    domain TEXT NOT NULL,
+    url TEXT NOT NULL,
+    payload TEXT NOT NULL,               -- exact JSON body (signature covers these bytes)
+    status TEXT NOT NULL,                -- pending | delivered | failed
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_attempt INTEGER NOT NULL,       -- epoch ms
+    last_error TEXT,
+    created INTEGER NOT NULL,
+    updated INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS deliveries_due ON deliveries(status, next_attempt);
   CREATE TABLE IF NOT EXISTS api_keys (
     key TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id)
@@ -70,6 +85,20 @@ export class Store {
     this.db = new DatabaseSync(join(dataDir, 'mail.db'));
     this.db.exec('PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
     this.db.exec(SCHEMA);
+    this.migrate();
+  }
+
+  /**
+   * Additive column migrations. CREATE TABLE IF NOT EXISTS silently skips tables that
+   * already exist, so columns added after an install shipped need ALTER TABLE — this
+   * runs on every boot and is a no-op once applied.
+   */
+  migrate() {
+    const cols = (table) => this.db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name);
+    const domainCols = cols('domains');
+    for (const [name, ddl] of [['webhook_url', 'TEXT'], ['webhook_secret', 'TEXT']]) {
+      if (!domainCols.includes(name)) this.db.exec(`ALTER TABLE domains ADD COLUMN ${name} ${ddl}`);
+    }
   }
 
   // --- accounts / credentials -------------------------------------------------
@@ -78,9 +107,12 @@ export class Store {
     this.db.prepare('INSERT OR IGNORE INTO users(name) VALUES (?)').run(name);
     return this.db.prepare('SELECT id FROM users WHERE name = ?').get(name).id;
   }
+  // INSERT OR IGNORE, not OR REPLACE: re-adding a domain must not silently drop its
+  // webhook config.
   addDomain(domain, userId) {
-    this.db.prepare('INSERT OR REPLACE INTO domains(domain, user_id) VALUES (?, ?)')
+    this.db.prepare('INSERT OR IGNORE INTO domains(domain, user_id) VALUES (?, ?)')
       .run(domain.toLowerCase(), userId);
+    this.db.prepare('UPDATE domains SET user_id = ? WHERE domain = ?').run(userId, domain.toLowerCase());
   }
   domains() {
     return this.db.prepare('SELECT domain FROM domains ORDER BY domain').all().map((r) => r.domain);
@@ -115,6 +147,72 @@ export class Store {
       }
     }
     return null;
+  }
+
+  // --- inbound webhooks ---------------------------------------------------------
+
+  /** Set (or clear, with a falsy url) a domain's webhook. Returns {url, secret}. */
+  setWebhook(domain, url) {
+    const d = String(domain).toLowerCase();
+    if (!url) {
+      this.db.prepare('UPDATE domains SET webhook_url = NULL, webhook_secret = NULL WHERE domain = ?').run(d);
+      return { url: null, secret: null };
+    }
+    const existing = this.db.prepare('SELECT webhook_secret FROM domains WHERE domain = ?').get(d);
+    // Keep the secret stable across URL edits so receivers don't have to re-key.
+    const secret = existing?.webhook_secret || 'whsec_' + randomBytes(24).toString('base64url');
+    this.db.prepare('UPDATE domains SET webhook_url = ?, webhook_secret = ? WHERE domain = ?').run(url, secret, d);
+    return { url, secret };
+  }
+  webhook(domain) {
+    const r = this.db.prepare('SELECT webhook_url url, webhook_secret secret FROM domains WHERE domain = ?')
+      .get(String(domain).toLowerCase());
+    return r && r.url ? r : null;
+  }
+  webhooks() {
+    return this.db.prepare(
+      'SELECT domain, webhook_url url FROM domains WHERE webhook_url IS NOT NULL ORDER BY domain').all();
+  }
+  anyWebhook() { return this.db.prepare('SELECT COUNT(*) c FROM domains WHERE webhook_url IS NOT NULL').get().c > 0; }
+
+  queueDelivery(domain, url, payload) {
+    const now = Date.now();
+    const r = this.db.prepare(
+      `INSERT INTO deliveries(domain, url, payload, status, attempts, next_attempt, created, updated)
+       VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)`).run(domain, url, payload, now, now, now);
+    return Number(r.lastInsertRowid);
+  }
+  dueDeliveries(limit = 20, now = Date.now()) {
+    return this.db.prepare(
+      `SELECT * FROM deliveries WHERE status = 'pending' AND next_attempt <= ?
+         ORDER BY next_attempt LIMIT ?`).all(now, limit);
+  }
+  /** Record an attempt: delivered, or scheduled for retry / exhausted. */
+  recordAttempt(id, { ok, error = null, backoffMs = null, maxed = false }) {
+    const now = Date.now();
+    if (ok) {
+      this.db.prepare(
+        `UPDATE deliveries SET status = 'delivered', attempts = attempts + 1, last_error = NULL, updated = ?
+           WHERE id = ?`).run(now, id);
+      return;
+    }
+    this.db.prepare(
+      `UPDATE deliveries SET status = ?, attempts = attempts + 1, last_error = ?,
+              next_attempt = ?, updated = ? WHERE id = ?`)
+      .run(maxed ? 'failed' : 'pending', String(error).slice(0, 500), now + (backoffMs || 0), now, id);
+  }
+  deliveryStatus(domain = null, limit = 20) {
+    const rows = domain
+      ? this.db.prepare(
+          `SELECT id, domain, url, status, attempts, next_attempt, last_error, created, updated
+             FROM deliveries WHERE domain = ? ORDER BY id DESC LIMIT ?`).all(String(domain).toLowerCase(), limit)
+      : this.db.prepare(
+          `SELECT id, domain, url, status, attempts, next_attempt, last_error, created, updated
+             FROM deliveries ORDER BY id DESC LIMIT ?`).all(limit);
+    const counts = this.db.prepare(
+      "SELECT status, COUNT(*) c FROM deliveries GROUP BY status").all()
+      .reduce((a, r) => ({ ...a, [r.status]: r.c }), { pending: 0, delivered: 0, failed: 0 });
+    return { recent: rows, counts };
   }
 
   // --- IMAP lockout (per IP, not per user) -------------------------------------

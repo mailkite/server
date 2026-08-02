@@ -16,7 +16,7 @@ const NAV: { key: NavKey; label: string; icon: typeof Globe }[] = [
   { key: "domains", label: "Domains", icon: Globe },
   { key: "messages", label: "Messages", icon: Inbox },
   { key: "credentials", label: "Credentials", icon: KeyRound },
-  { key: "webhooks", label: "Webhooks & routes", icon: Webhook },
+  { key: "webhooks", label: "Webhooks", icon: Webhook },
 ]
 
 export function AppShell({
