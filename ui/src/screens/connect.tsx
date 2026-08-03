@@ -17,12 +17,17 @@ import { useConnection } from "@/providers/context"
 import { cn } from "@/lib/utils"
 
 function MagicLinkForm() {
+  const { signedIn } = useConnection()
   const [email, setEmail] = useState("")
   const [sentTo, setSentTo] = useState<string | null>(null)
 
   const send = useMutation({
     mutationFn: () => requestLink(email.trim()),
-    onSuccess: () => setSentTo(email.trim()),
+    onSuccess: (r) => {
+      // Servers with no mail channel sign a known admin in directly — nothing to check.
+      if (r.signedIn) signedIn(r.email || email.trim())
+      else setSentTo(email.trim())
+    },
     onError: (e) => toast.error(errMsg(e)),
   })
 
@@ -36,10 +41,6 @@ function MagicLinkForm() {
         <p className="text-sm text-muted-foreground">
           If <span className="font-mono text-xs">{sentTo}</span> is an admin here, a sign-in link is on
           its way. It works once and expires in 15 minutes.
-        </p>
-        <p className="text-xs text-muted-foreground">
-          Server not sending email yet? The link is printed in its log:{" "}
-          <code className="font-mono">journalctl -u mailkite-backend | grep magic-link</code>
         </p>
         <Button variant="ghost" size="sm" onClick={() => setSentTo(null)}>
           Use a different email
@@ -169,10 +170,10 @@ export function SignInScreen() {
           <CardContent className="flex items-center justify-between gap-3 p-4">
             <div className="min-w-0">
               <div className="text-sm font-medium">
-                MailKite Cloud <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">web console support coming soon</span>
+                MailKite Cloud <span className="ml-1.5 rounded-full bg-secondary px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">not yet</span>
               </div>
               <p className="mt-0.5 text-xs text-muted-foreground">
-                Skip the mail server entirely — hosted inbound, deliverability, and webhooks.
+                This web console manages a self-hosted server. For a MailKite Cloud account, sign in at app.mailkite.dev.
               </p>
             </div>
             <a

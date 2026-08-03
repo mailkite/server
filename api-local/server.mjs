@@ -50,6 +50,9 @@ const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^
 // access is the root credential).
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const SEND_KEY = process.env.MAILKITE_SEND_KEY || '';
+// Can this server deliver mail at all? Drives sign-in mode (magic link vs direct admin
+// sign-in) — see the request-link handler.
+const MAIL_CHANNEL = !!(SEND_KEY || SMARTHOST);
 const MAGIC_FROM = process.env.MAGIC_LINK_FROM || '';
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 if (ADMIN_EMAIL) store.addAdminUser(ADMIN_EMAIL);
@@ -264,6 +267,16 @@ Object.assign(routes, {
     store.authFail(ip);
     const { email } = JSON.parse(raw.toString() || '{}');
     if (typeof email === 'string' && store.isAdminUser(email)) {
+      // No way to deliver mail → emailing a link would strand the admin in the server
+      // log. In that mode knowing the admin address IS the credential: sign in directly.
+      // (Deliberate: enumeration is moot when the email is the credential; per-IP rate
+      // limiting above still applies. Configure SMARTHOST/MAILKITE_SEND_KEY to require
+      // link verification.)
+      if (!MAIL_CHANNEL) {
+        console.warn(`auto-login (no mail channel configured): ${email.toLowerCase()} ip=${clientIp(req)}`);
+        setSessionCookie(res, store.createSession(email.toLowerCase()));
+        return json(res, 200, { ok: true, signedIn: true, email: email.toLowerCase() });
+      }
       const token = store.createLoginToken(email);
       await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
     }
@@ -286,7 +299,7 @@ Object.assign(routes, {
     return email ? json(res, 200, { email }) : json(res, 401, { error: 'not signed in' });
   },
   // Unclaimed-install probe for the web console's routing.
-  'GET /api/auth/status': async (req, res) => json(res, 200, { needsSetup: needsSetup() }),
+  'GET /api/auth/status': async (req, res) => json(res, 200, { needsSetup: needsSetup(), mailChannel: MAIL_CHANNEL }),
   // First-visitor admin claim (WordPress-style): only while the install has no admin
   // and no ADMIN_EMAIL. Recovery from a squatted claim: `cli.mjs reset-admin <email>`.
   'POST /api/auth/setup': async (req, res, raw) => {

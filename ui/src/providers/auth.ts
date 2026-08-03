@@ -7,9 +7,15 @@ async function post(path: string, body: unknown): Promise<Response> {
   return fetch(path, { method: "POST", headers: HDRS, body: JSON.stringify(body) })
 }
 
-/** Fire-and-forget by design: the server always answers {ok:true} (no enumeration). */
-export async function requestLink(email: string): Promise<void> {
-  await post("/api/auth/request-link", { email })
+/**
+ * Ask for a sign-in link. The server always answers {ok:true} (no enumeration).
+ * When it has no way to send mail, a known admin email is signed in immediately
+ * instead — {signedIn:true} means we're already in.
+ */
+export async function requestLink(email: string): Promise<{ signedIn: boolean; email?: string }> {
+  const res = await post("/api/auth/request-link", { email })
+  const body = await res.json().catch(() => ({}) as { signedIn?: boolean; email?: string })
+  return { signedIn: !!body.signedIn, email: body.email }
 }
 
 export async function verifyToken(token: string): Promise<string> {
@@ -19,14 +25,14 @@ export async function verifyToken(token: string): Promise<string> {
   return body.email as string
 }
 
-/** Unclaimed install? Drives the create-admin routing. */
-export async function authStatus(): Promise<{ needsSetup: boolean }> {
+/** Unclaimed install? Can the server send mail? Drives routing + sign-in copy. */
+export async function authStatus(): Promise<{ needsSetup: boolean; mailChannel: boolean }> {
   try {
     const res = await fetch("/api/auth/status", { headers: { "x-mailkite-ui": "1" } })
-    if (!res.ok) return { needsSetup: false }
-    return (await res.json()) as { needsSetup: boolean }
+    if (!res.ok) return { needsSetup: false, mailChannel: true }
+    return (await res.json()) as { needsSetup: boolean; mailChannel: boolean }
   } catch {
-    return { needsSetup: false }
+    return { needsSetup: false, mailChannel: true }
   }
 }
 

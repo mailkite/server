@@ -50,6 +50,20 @@ single-writer; `/data` is the database, back it up.
 
 ## Web console auth (magic link)
 
+**Sign-in mode depends on whether this server can send mail:**
+
+| `SMARTHOST` / `MAILKITE_SEND_KEY` | Sign-in |
+|---|---|
+| neither set | An admin email **signs in directly** — no link, no log-digging. Knowing the admin address is the credential (the server has no way to verify it by mail). Per-IP rate limiting still applies. |
+| either set | Magic link: the admin gets a single-use link (15 min) by email; only clicking it creates a session. |
+
+Configure a mail channel before exposing an install to the internet if you want link
+verification. Admin identity itself is anchored by `ADMIN_EMAIL` (or the first-visitor
+claim on unclaimed installs — see below).
+
+### Details
+
+
 The web console signs in with **email magic links**, not the HMAC secret:
 
 | Env | Purpose |

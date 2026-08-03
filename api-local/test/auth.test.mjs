@@ -37,7 +37,11 @@ const waitLog = async (re, timeoutMs = 5000) => {
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'mk-auth-'));
   proc = spawn('node', [join(dir, 'server.mjs')], {
-    env: { ...process.env, DATA_DIR: dataDir, HMAC_SECRET: SECRET, PORT: String(PORT), ADMIN_EMAIL: ADMIN },
+    env: { ...process.env, DATA_DIR: dataDir, HMAC_SECRET: SECRET, PORT: String(PORT), ADMIN_EMAIL: ADMIN,
+      // A configured mail channel keeps this instance on the magic-link path (links
+      // still log, since MAILKITE_SEND_KEY is unset). The no-channel direct sign-in
+      // mode gets its own instance below.
+      SMARTHOST: 'smtp://u:p@127.0.0.1:2525' },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   proc.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -122,14 +126,14 @@ test('login tokens: expiry honored at the store level', () => {
 
 test('setup is unavailable when ADMIN_EMAIL is configured', async () => {
   const status = await ui('/api/auth/status');
-  assert.deepEqual(await status.json(), { needsSetup: false });
+  assert.equal((await status.json()).needsSetup, false);
   const claim = await ui('/api/auth/setup', { email: 'squatter@x.example' });
   assert.equal(claim.status, 403);
 });
 
 test('unclaimed install: first email claims admin (WP-style), once; reset-admin recovers', async () => {
   const dir2 = mkdtempSync(join(tmpdir(), 'mk-setup-'));
-  const PORT2 = 18792;
+  const PORT2 = PORT + 1; // pid-derived base, no cross-run collisions
   const B2 = `http://127.0.0.1:${PORT2}`;
   let out = '';
   const p2 = spawn('node', [join(dir, 'server.mjs')], {
@@ -147,7 +151,7 @@ test('unclaimed install: first email claims admin (WP-style), once; reset-admin 
       try { await u2('/api/auth/me'); break; }
       catch { await new Promise((r) => setTimeout(r, 100)); }
     }
-    assert.deepEqual(await (await u2('/api/auth/status')).json(), { needsSetup: true });
+    assert.equal((await (await u2('/api/auth/status')).json()).needsSetup, true);
 
     const bad = await u2('/api/auth/setup', { email: 'not-an-email' });
     assert.equal(bad.status, 400);
@@ -160,7 +164,7 @@ test('unclaimed install: first email claims admin (WP-style), once; reset-admin 
 
     const admin = await u2('/api/admin/overview', undefined, { cookie: c2 });
     assert.equal(admin.status, 200, 'claim session unlocks the web console');
-    assert.deepEqual(await (await u2('/api/auth/status')).json(), { needsSetup: false });
+    assert.equal((await (await u2('/api/auth/status')).json()).needsSetup, false);
 
     const again = await u2('/api/auth/setup', { email: 'other@x.example' });
     assert.equal(again.status, 403, 'claim is once-only');
@@ -170,12 +174,66 @@ test('unclaimed install: first email claims admin (WP-style), once; reset-admin 
       { env: { ...process.env, DATA_DIR: dir2 } });
     const revoked = await u2('/api/admin/overview', undefined, { cookie: c2 });
     assert.equal(revoked.status, 401, 'squatter session revoked by reset-admin');
-    await u2('/api/auth/request-link', { email: 'rescue@new.example' });
-    const t0 = Date.now();
-    while (!/magic-link: \S+/.test(out) && Date.now() - t0 < 5000) await new Promise((r) => setTimeout(r, 50));
-    assert.match(out, /magic-link: \S+/, 'reset admin can request sign-in links');
+    // This instance has no mail channel, so the rescued admin signs in directly.
+    const rescued = await (await u2('/api/auth/request-link', { email: 'rescue@new.example' })).json();
+    assert.equal(rescued.signedIn, true, 'reset admin can sign in');
   } finally {
     p2.kill();
     rmSync(dir2, { recursive: true, force: true });
   }
+});
+
+// --- no-mail-channel direct sign-in (Gabe 2026-08-03) --------------------------
+// With no SMARTHOST/MAILKITE_SEND_KEY the server can't deliver a link, so a known
+// admin email signs in directly rather than stranding the admin in the server log.
+test('no mail channel: direct admin sign-in, no session for strangers', async () => {
+  const P3 = PORT + 2;
+  const B3 = `http://127.0.0.1:${P3}`;
+  const dir3 = mkdtempSync(join(tmpdir(), 'mk-nochan-'));
+  const p3 = spawn('node', [join(dir, 'server.mjs')], {
+    env: { ...process.env, DATA_DIR: dir3, HMAC_SECRET: SECRET, PORT: String(P3), ADMIN_EMAIL: ADMIN, SMARTHOST: '', MAILKITE_SEND_KEY: '' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 60; i++) {
+      try { await fetch(B3 + '/api/auth/status'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    const s = await (await fetch(B3 + '/api/auth/status')).json();
+    assert.equal(s.mailChannel, false, 'status reports no mail channel');
+
+    const r = await fetch(B3 + '/api/auth/request-link', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN }),
+    });
+    const body = await r.json();
+    assert.equal(body.signedIn, true, 'admin signs in directly when no channel');
+    const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+    assert.match(cookie, /^mk_session=/);
+    const me = await fetch(B3 + '/api/admin/overview', { headers: { cookie, 'x-mailkite-ui': '1' } });
+    assert.equal(me.status, 200, 'that session works on the admin API');
+
+    const r2 = await fetch(B3 + '/api/auth/request-link', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'stranger@nowhere.example' }),
+    });
+    const b2 = await r2.json();
+    assert.equal(b2.ok, true);
+    assert.ok(!b2.signedIn, 'no direct sign-in for non-admins');
+    assert.ok(!(r2.headers.get('set-cookie') || '').includes('mk_session='), 'no cookie for strangers');
+  } finally {
+    p3.kill();
+    rmSync(dir3, { recursive: true, force: true });
+  }
+});
+
+test('mail channel configured: magic link required (no direct sign-in)', async () => {
+  const r = await fetch(BASE + '/api/auth/request-link', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: ADMIN }),
+  });
+  const body = await r.json();
+  assert.ok(!body.signedIn, 'link flow, not direct sign-in');
+  assert.ok(!(r.headers.get('set-cookie') || '').includes('mk_session='));
+  const s = await (await fetch(BASE + '/api/auth/status')).json();
+  assert.equal(s.mailChannel, true);
 });
