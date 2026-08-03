@@ -97,10 +97,35 @@ working** on `/api/admin/*` for scripts and the conformance suite.
 node cli.mjs add-user gabe
 node cli.mjs add-domain yourdomain.com gabe
 node cli.mjs add-key gabe                       # → mk_local_… (SMTP AUTH password / relay Bearer)
-node cli.mjs add-app-password you@yourdomain.com # → mk_imap_… (IMAP login)
+node cli.mjs add-app-password yourdomain.com     # → mk_pw_… covering every address, IMAP
+node cli.mjs add-app-password yourdomain.com 'support-*' --imap --api --label='support agent'
+node cli.mjs add-app-password you@yourdomain.com # shorthand: that one address, IMAP only
 node cli.mjs list
 node cli.mjs reset-admin you@yourdomain.com      # recover a squatted web-console claim
 ```
+
+## App passwords
+
+One credential model for mailbox access — **(domain, address pattern) × access** — shared
+with MailKite Cloud so both consoles mean the same thing. Full spec:
+[`../docs/app-passwords.md`](../docs/app-passwords.md).
+
+| | |
+|---|---|
+| Scope | one hosted domain + a local-part pattern: `*` (whole domain), `hello`, `support-*`, `*-agent` |
+| Access | `imap` (mail clients), `api` (agents and scripts), or both |
+| Secret | `mk_pw_…`, shown once, stored scrypt-hashed. Secrets issued as `mk_imap_…` keep working indefinitely |
+| Manage | the web console's **Credentials** screen, `POST /api/admin/app-passwords`, or the CLI above |
+
+With `api` access, a password reads its mailbox over plain HTTPS — no IMAP client:
+
+```sh
+curl -H "Authorization: Bearer mk_pw_…" \
+  "https://your-server/api/mailbox/messages?address=support@yourdomain.com"
+```
+
+Reads are scoped to the address named in the request, so a password for
+`support@yourdomain.com` never sees the rest of the account's mail.
 
 ## Outbound (smarthost)
 

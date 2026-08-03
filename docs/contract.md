@@ -100,7 +100,11 @@ mailbox address; `null` = account-wide.
   victim DoS).
 - **Response:** `200 {"ok": true, "userId": ..., "domain": ..., "mailboxId": <id|null>}`;
   failure → `{"ok": false, "code": "bad_credentials"}` or non-2xx.
-- App-passwords are scoped credentials, never full API keys. Domains without retention
+- The password is an **app password** ([`app-passwords.md`](app-passwords.md)): the
+  backend resolves it, then checks that its `domain` equals the username's domain, that
+  its `address` pattern covers the username's local part, and that it grants `imap`
+  access. A password scoped `*` therefore serves every address on its domain.
+- App passwords are scoped credentials, never full API keys. Domains without retention
   (passthrough) must fail auth.
 
 ### `POST /api/imap/status`
@@ -132,8 +136,29 @@ mailbox address; `null` = account-wide.
 
 ### `POST /api/imap/keys` *(optional, dashboard/CLI surface)*
 
-Create an app-password for a mailbox address. Not called by any edge; backends may expose
-it however suits them (the reference backend uses its CLI instead).
+Create an app password for a mailbox address. Not called by any edge; backends may expose
+it however suits them (the reference backend uses `/api/admin/app-passwords` and its CLI).
+
+---
+
+## Mailbox API — user-trust
+
+Read and manage one mailbox with an app password, no IMAP client involved. Auth is
+`Authorization: Bearer <app password>`, and the password must grant `api` access and
+cover the `address` being acted on. `address` is always a **concrete** mailbox — a
+password scoped `*` still names which one it means (a pattern is rejected with 400).
+
+| Route | |
+|---|---|
+| `GET /api/mailbox/messages?address=&mailbox=&limit=&before=` | list, newest first; `{address, mailbox, messages[], nextBefore}` |
+| `GET /api/mailbox/messages/:uid/raw?address=` | raw RFC822 (`message/rfc822`) |
+| `POST /api/mailbox/messages/:uid/flags` | `{address, flags, mailbox?}` — full replacement set |
+
+Reads are scoped to that address: INBOX by the envelope recipient the message was stored
+for, Sent by its sender. A message belonging to another address answers `404`, not `403`,
+so the routes never confirm what exists outside the password's scope. Failures:
+`401` (no bearer), `403` (unknown password, missing `api` access, or an address the
+password doesn't cover), `400` (missing/pattern address).
 
 ---
 

@@ -58,7 +58,7 @@ test('domain add/list, validation, and credential issuance', async () => {
   const badPw = await admin('/api/admin/app-passwords', { username: 'x@elsewhere.example' });
   assert.equal(badPw.status, 400, 'app-password only for hosted domains');
   const { password } = await (await admin('/api/admin/app-passwords', { username: 'inbox@apps.example' })).json();
-  assert.ok(password.startsWith('mk_imap_'));
+  assert.ok(password.startsWith('mk_pw_'), 'new app passwords use the universal prefix');
 
   const creds = await (await admin('/api/admin/credentials')).json();
   assert.deepEqual(creds.apiKeys, [key]);

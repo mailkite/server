@@ -27,7 +27,8 @@ submission inject endpoint). Implement that contract over any store and every ed
 works unchanged — the reference SQLite backend and MailKite Cloud are just two
 implementations of it. One MX edge can even serve **several backends at once**, routing
 each recipient domain to its owner — see [`docs/multi-backend.md`](docs/multi-backend.md).
-See [`docs/contract.md`](docs/contract.md); the conformance suite
+See [`docs/contract.md`](docs/contract.md) and [`docs/app-passwords.md`](docs/app-passwords.md)
+(mailbox credentials: one domain, an address pattern, IMAP and/or API access); the conformance suite
 in `api-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
 full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
 

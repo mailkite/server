@@ -13,6 +13,8 @@ import {
   type MailProvider,
   type Mailbox,
   type MessagePage,
+  type AppPassword,
+  type NewAppPassword,
   type Overview,
   type WebhookConfig,
   type WebhookStatus,
@@ -80,11 +82,15 @@ export class LocalProvider implements MailProvider {
     const { key } = await (await this.call("/api/admin/keys", { method: "POST", body: "{}" })).json()
     return key
   }
-  async createAppPassword(username: string): Promise<string> {
-    const { password } = await (
-      await this.call("/api/admin/app-passwords", { method: "POST", body: JSON.stringify({ username }) })
-    ).json()
-    return password
+  async appPasswords(): Promise<AppPassword[]> {
+    const { appPasswords } = await (await this.call("/api/admin/app-passwords")).json()
+    return appPasswords
+  }
+  async createAppPassword(spec: NewAppPassword): Promise<{ secret: string } & AppPassword> {
+    return (await this.call("/api/admin/app-passwords", { method: "POST", body: JSON.stringify(spec) })).json()
+  }
+  async deleteAppPassword(id: number): Promise<void> {
+    await this.call(`/api/admin/app-passwords/${id}`, { method: "DELETE" })
   }
 
   async webhooks(): Promise<WebhookConfig[]> {

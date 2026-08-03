@@ -35,11 +35,13 @@ const SCHEMA = `
     key TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id)
   );
-  CREATE TABLE IF NOT EXISTS app_passwords (
+  CREATE TABLE IF NOT EXISTS app_passwords (   -- docs/app-passwords.md
     username TEXT NOT NULL,              -- a mailbox address, e.g. you@yourdomain.com
-    hash TEXT NOT NULL,                  -- scrypt(password)
+    hash TEXT NOT NULL,                  -- scrypt(secret): what actually verifies
     user_id INTEGER NOT NULL REFERENCES users(id),
     mailbox_id INTEGER                   -- reserved: per-address scoping (null = account-wide)
+    -- domain / address / protocols / lookup / label / created_at / last_used_at are
+    -- added by migrate() so installs that predate them upgrade in place.
   );
   CREATE TABLE IF NOT EXISTS mailboxes (
     user_id INTEGER NOT NULL,
@@ -99,6 +101,39 @@ export class Store {
     for (const [name, ddl] of [['webhook_url', 'TEXT'], ['webhook_secret', 'TEXT']]) {
       if (!domainCols.includes(name)) this.db.exec(`ALTER TABLE domains ADD COLUMN ${name} ${ddl}`);
     }
+    this.migrateAppPasswords();
+  }
+
+  /**
+   * App passwords gained scoping (domain + address pattern) and protocols. Existing
+   * rows are backfilled from their `username`: address-scoped, imap-only — exactly the
+   * behaviour they had. Their secrets can't be re-derived into a `lookup` hash, so
+   * those stay NULL and are verified by the scan path in findAppPassword(); a
+   * `mk_imap_` secret issued years ago keeps authenticating.
+   */
+  migrateAppPasswords() {
+    const cols = this.db.prepare('PRAGMA table_info(app_passwords)').all().map((r) => r.name);
+    for (const [name, ddl] of [
+      ['domain', 'TEXT'], ['address', 'TEXT'], ['protocols', 'TEXT'],
+      ['lookup', 'TEXT'], ['label', 'TEXT'], ['created_at', 'INTEGER'], ['last_used_at', 'INTEGER'],
+    ]) {
+      if (!cols.includes(name)) this.db.exec(`ALTER TABLE app_passwords ADD COLUMN ${name} ${ddl}`);
+    }
+    // UNIQUE can't be added by ALTER TABLE; a partial index does the same job and
+    // leaves legacy rows (lookup NULL) out of the constraint.
+    this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS app_passwords_lookup
+                    ON app_passwords(lookup) WHERE lookup IS NOT NULL`);
+    this.db.exec('CREATE INDEX IF NOT EXISTS app_passwords_domain ON app_passwords(domain)');
+    // Backfill scope for rows written before the columns existed.
+    for (const r of this.db.prepare(
+      'SELECT rowid, username FROM app_passwords WHERE domain IS NULL OR address IS NULL').all()) {
+      const at = String(r.username || '').lastIndexOf('@');
+      if (at < 1) continue;
+      this.db.prepare(
+        `UPDATE app_passwords SET domain = ?, address = ?, protocols = COALESCE(protocols, 'imap'),
+                created_at = COALESCE(created_at, ?) WHERE rowid = ?`)
+        .run(r.username.slice(at + 1).toLowerCase(), r.username.slice(0, at).toLowerCase(), Date.now(), r.rowid);
+    }
   }
 
   // --- accounts / credentials -------------------------------------------------
@@ -129,22 +164,60 @@ export class Store {
     const r = this.db.prepare('SELECT user_id FROM api_keys WHERE key = ?').get(key);
     return r ? r.user_id : null;
   }
-  addAppPassword(username, userId, password = 'mk_imap_' + randomBytes(18).toString('base64url')) {
+  // --- app passwords (docs/app-passwords.md) ------------------------------------
+  // (domain, address pattern) × protocols. Secrets are stored twice — sha256 for the
+  // indexed lookup, scrypt for the actual verification — so authenticating a bearer is
+  // one indexed read rather than a scrypt scan over every row.
+
+  addAppPassword({ domain, address = '*', protocols = ['imap'], label = null, userId, secret }) {
+    const raw = secret || 'mk_pw_' + randomBytes(24).toString('base64url');
     const salt = randomBytes(16);
-    const hash = salt.toString('hex') + ':' + scryptSync(password, salt, 32).toString('hex');
-    this.db.prepare('INSERT INTO app_passwords(username, hash, user_id) VALUES (?, ?, ?)')
-      .run(username.toLowerCase(), hash, userId);
-    return password;
+    const hash = salt.toString('hex') + ':' + scryptSync(raw, salt, 32).toString('hex');
+    const d = String(domain).toLowerCase();
+    const a = String(address).toLowerCase();
+    const protoCsv = [...new Set(protocols)].filter((p) => p === 'imap' || p === 'api').join(',');
+    const r = this.db.prepare(
+      `INSERT INTO app_passwords (username, hash, user_id, domain, address, protocols, lookup, label, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(`${a}@${d}`, hash, userId, d, a, protoCsv, this.hashToken(raw), label, Date.now());
+    return { id: Number(r.lastInsertRowid), secret: raw };
   }
-  checkAppPassword(username, password) {
-    const rows = this.db.prepare('SELECT hash, user_id, mailbox_id FROM app_passwords WHERE username = ?')
-      .all(username.toLowerCase());
-    for (const r of rows) {
-      const [saltHex, hashHex] = r.hash.split(':');
-      const got = scryptSync(password, Buffer.from(saltHex, 'hex'), 32);
-      if (timingSafeEqual(got, Buffer.from(hashHex, 'hex'))) {
-        return { userId: r.user_id, mailboxId: r.mailbox_id ?? null, domain: username.split('@')[1] || '' };
-      }
+
+  /** Listing never exposes secrets — only what a password covers and when it was used. */
+  appPasswords(userId = null) {
+    const sql = `SELECT rowid AS id, label, domain, address, protocols, created_at, last_used_at
+                   FROM app_passwords ${userId == null ? '' : 'WHERE user_id = ?'} ORDER BY rowid DESC`;
+    const rows = userId == null ? this.db.prepare(sql).all() : this.db.prepare(sql).all(userId);
+    return rows.map((r) => ({ ...r, protocols: r.protocols ? r.protocols.split(',') : [] }));
+  }
+  deleteAppPassword(id) {
+    return this.db.prepare('DELETE FROM app_passwords WHERE rowid = ?').run(id).changes > 0;
+  }
+  touchAppPassword(id) {
+    this.db.prepare('UPDATE app_passwords SET last_used_at = ? WHERE rowid = ?').run(Date.now(), id);
+  }
+
+  /** Constant-time scrypt check against a stored `salt:hash`. */
+  static verifyScrypt(secret, stored) {
+    const [saltHex, hashHex] = String(stored).split(':');
+    if (!saltHex || !hashHex) return false;
+    const got = scryptSync(secret, Buffer.from(saltHex, 'hex'), 32);
+    const want = Buffer.from(hashHex, 'hex');
+    return got.length === want.length && timingSafeEqual(got, want);
+  }
+
+  /**
+   * Resolve a secret to its row. New secrets hit the indexed lookup; pre-migration
+   * ones (no lookup hash — typically `mk_imap_…`) fall back to a scan so they keep
+   * working forever.
+   */
+  findAppPassword(secret) {
+    if (!secret) return null;
+    const row = this.db.prepare('SELECT rowid AS id, * FROM app_passwords WHERE lookup = ?')
+      .get(this.hashToken(secret));
+    if (row) return Store.verifyScrypt(secret, row.hash) ? row : null;
+    for (const r of this.db.prepare('SELECT rowid AS id, * FROM app_passwords WHERE lookup IS NULL').all()) {
+      if (Store.verifyScrypt(secret, r.hash)) return r;
     }
     return null;
   }
@@ -361,12 +434,48 @@ export class Store {
              ORDER BY uid DESC LIMIT ?`).all(userId, mailbox, limit);
     return rows;
   }
+  // Address-scoped reads for the mailbox REST routes: a key for hello@domain must not
+  // see the rest of the account's mail. INBOX is scoped by the envelope recipient the
+  // message was stored for; Sent by who sent it.
+  static addressColumn(mailbox) { return mailbox === 'Sent' ? 'from_addr' : 'rcpt'; }
+
+  listPagedForAddress(userId, mailbox, address, { limit = 50, beforeUid = null } = {}) {
+    const col = Store.addressColumn(mailbox);
+    const addr = String(address).toLowerCase();
+    const sql = `SELECT uid, flags, internaldate, from_addr, to_addr, subject, size
+                   FROM messages
+                  WHERE user_id = ? AND mailbox = ? AND lower(${col}) = ?
+                    ${beforeUid ? 'AND uid < ?' : ''}
+                  ORDER BY uid DESC LIMIT ?`;
+    return beforeUid
+      ? this.db.prepare(sql).all(userId, mailbox, addr, beforeUid, limit)
+      : this.db.prepare(sql).all(userId, mailbox, addr, limit);
+  }
+  rawForAddress(userId, mailbox, address, uid) {
+    const col = Store.addressColumn(mailbox);
+    const r = this.db.prepare(
+      `SELECT blob FROM messages
+        WHERE user_id = ? AND mailbox = ? AND uid = ? AND lower(${col}) = ?`)
+      .get(userId, mailbox, uid, String(address).toLowerCase());
+    return r ? this.getBlob(r.blob) : null;
+  }
+  setFlagsForAddress(userId, mailbox, address, uid, flags) {
+    const col = Store.addressColumn(mailbox);
+    return this.db.prepare(
+      `UPDATE messages SET flags = ?
+        WHERE user_id = ? AND mailbox = ? AND uid = ? AND lower(${col}) = ?`)
+      .run(flags, userId, mailbox, uid, String(address).toLowerCase()).changes > 0;
+  }
+
   apiKeys(userId) {
     return this.db.prepare('SELECT key FROM api_keys WHERE user_id = ?').all(userId).map((r) => r.key);
   }
+  /** Legacy view: imap-capable passwords as addresses (`*@domain` when domain-wide). */
   appPasswordUsers(userId) {
-    return this.db.prepare('SELECT DISTINCT username FROM app_passwords WHERE user_id = ?')
-      .all(userId).map((r) => r.username);
+    return this.db.prepare(
+      `SELECT DISTINCT address || '@' || domain AS username FROM app_passwords
+        WHERE user_id = ? AND instr(',' || COALESCE(protocols, 'imap') || ',', ',imap,') > 0
+          AND domain IS NOT NULL ORDER BY username`).all(userId).map((r) => r.username);
   }
 
   status(userId, mailbox) {

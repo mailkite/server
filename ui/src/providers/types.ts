@@ -37,6 +37,25 @@ export type Overview = {
   capabilities: Capabilities
 }
 
+/** An app password: what it covers (docs/app-passwords.md) — never the secret itself. */
+export type AppPassword = {
+  id: number
+  label: string | null
+  domain: string
+  /** Local-part pattern: "*" (whole domain), "hello", "support-*", "*-agent". */
+  address: string
+  protocols: ("imap" | "api")[]
+  created_at: number | null
+  last_used_at: number | null
+}
+
+export type NewAppPassword = {
+  domain: string
+  address: string
+  protocols: ("imap" | "api")[]
+  label?: string | null
+}
+
 export type WebhookConfig = { domain: string; url: string | null; secret?: string | null }
 
 export type Delivery = {
@@ -67,7 +86,10 @@ export interface MailProvider {
   rawMessage(mailbox: Mailbox, uid: number): Promise<string>
   credentials(): Promise<{ apiKeys: string[]; appPasswords: string[] }>
   createKey(): Promise<string>
-  createAppPassword(username: string): Promise<string>
+  /** App passwords — mailbox access for a mail client, an app, or an agent. */
+  appPasswords(): Promise<AppPassword[]>
+  createAppPassword(spec: NewAppPassword): Promise<{ secret: string } & AppPassword>
+  deleteAppPassword(id: number): Promise<void>
   /** Inbound webhook config — one target per domain. */
   webhooks(): Promise<WebhookConfig[]>
   webhook(domain: string): Promise<WebhookConfig>

@@ -16,6 +16,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
 import { parseSmarthost, relayExternal } from './lib/smarthost.mjs';
+import { matchesAddress, normalizePattern, splitAddress } from './lib/patterns.mjs';
 import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
 
 const SECRET = process.env.HMAC_SECRET || '';
@@ -138,6 +139,23 @@ async function detectPublicIp(req) {
   return IPV4_RE.test(local) && !isPrivateV4(local) ? local : null;
 }
 
+/**
+ * Resolve an app-password secret against a concrete address and protocol.
+ * Returns the shape /api/imap/auth has always answered with, plus the row, or null
+ * when the secret is unknown, lacks the protocol, or doesn't cover the address.
+ * Rows predating scoping default to imap-only on their own address.
+ */
+function resolveAppPassword(secret, address, protocol) {
+  const pw = store.findAppPassword(secret);
+  if (!pw) return null;
+  if (!String(pw.protocols || 'imap').split(',').includes(protocol)) return null;
+  const scope = pw.domain || splitAddress(pw.username).domain;
+  const pattern = pw.address || splitAddress(pw.username).local;
+  if (!matchesAddress(pattern, address, scope)) return null;
+  const { domain } = splitAddress(address);
+  return { userId: pw.user_id, domain, mailboxId: pw.mailbox_id ?? null, row: pw };
+}
+
 const routes = {
   // ---- inbound ---------------------------------------------------------------
   'POST /api/ingest': async (req, res, raw) => {
@@ -242,11 +260,13 @@ const routes = {
   },
 
   // ---- IMAP read API -----------------------------------------------------------
+  // App passwords: domain + address pattern + the `imap` protocol. Secrets issued
+  // before scoping existed (`mk_imap_…`) resolve through the same path.
   'POST /api/imap/auth': async (req, res, raw) => {
     if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const { username, password, ip } = JSON.parse(raw.toString() || '{}');
     if (store.lockedOut(ip)) return json(res, 429, { ok: false, code: 'locked_out' });
-    const hit = username && password ? store.checkAppPassword(username, password) : null;
+    const hit = (username && password) ? resolveAppPassword(password, username, 'imap') : null;
     if (!hit) { store.authFail(ip); return json(res, 200, { ok: false, code: 'bad_credentials' }); }
     store.authOk(ip);
     return json(res, 200, { ok: true, userId: hit.userId, domain: hit.domain, mailboxId: hit.mailboxId });
@@ -425,20 +445,47 @@ Object.assign(routes, {
   'GET /api/admin/credentials': async (req, res) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const u = store.defaultUser();
-    return json(res, 200, { apiKeys: store.apiKeys(u), appPasswords: store.appPasswordUsers(u) });
+    return json(res, 200, {
+      apiKeys: store.apiKeys(u),
+      appPasswords: store.appPasswordUsers(u),      // legacy shape: addresses only
+      appPasswordRows: store.appPasswords(u),       // full rows: scope + access + usage
+    });
   },
   'POST /api/admin/keys': async (req, res) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { key: store.addApiKey(store.defaultUser()) });
   },
+  // App passwords (docs/app-passwords.md). Canonical body is
+  // {domain, address, protocols[], label}; the older {username} form still works and
+  // means "this one address, IMAP only".
+  'GET /api/admin/app-passwords': async (req, res) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, { appPasswords: store.appPasswords(store.defaultUser()) });
+  },
   'POST /api/admin/app-passwords': async (req, res, raw) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-    const { username } = JSON.parse(raw.toString() || '{}');
-    const domain = (username || '').split('@')[1] || '';
-    if (!store.domains().includes(domain.toLowerCase())) {
-      return json(res, 400, { error: `domain not hosted here: ${domain || '(none)'}`, code: 'bad_domain' });
+    const body = JSON.parse(raw.toString() || '{}');
+    const legacy = !body.domain && typeof body.username === 'string';
+    const parsed = legacy ? splitAddress(body.username) : { local: null, domain: null };
+    const d = String(legacy ? parsed.domain : (body.domain || '')).toLowerCase();
+    if (!d || !store.domains().includes(d)) {
+      return json(res, 400, { error: `domain not hosted here: ${d || '(none)'}`, code: 'bad_domain' });
     }
-    return json(res, 200, { username, password: store.addAppPassword(username, store.defaultUser()) });
+    const pattern = normalizePattern(legacy ? parsed.local : (body.address ?? '*'), d);
+    if (!pattern) {
+      return json(res, 400, { error: `invalid address pattern: ${body.address ?? body.username}`, code: 'bad_address' });
+    }
+    const protos = [...new Set(legacy ? ['imap'] : (body.protocols || ['imap']))]
+      .filter((p) => p === 'imap' || p === 'api');
+    if (!protos.length) return json(res, 400, { error: 'pick at least one kind of access (imap, api)', code: 'bad_protocols' });
+    const label = body.label || null;
+    const { id, secret } = store.addAppPassword({
+      domain: d, address: pattern, protocols: protos, label, userId: store.defaultUser(),
+    });
+    return json(res, 200, {
+      id, domain: d, address: pattern, protocols: protos, label,
+      secret, password: secret, username: `${pattern}@${d}`,  // password/username: legacy field names
+    });
   },
   'GET /api/admin/messages': async (req, res) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
@@ -458,7 +505,70 @@ Object.assign(routes, {
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     return res.end(bytes);
   },
+
 });
+
+// ---- mailbox REST API (user-trust: Bearer app password with `api` access) --------
+// The address must be concrete and covered by the password — one scoped `*` still has
+// to name which mailbox it's acting on, and reads are scoped to that address.
+const mailboxAuth = (req, address) => {
+  const secret = (req.headers.authorization || '').replace(/^Bearer /, '');
+  if (!secret) return { error: 'missing bearer token', code: 'no_key', status: 401 };
+  const { local, domain } = splitAddress(address);
+  if (!local || !domain) return { error: 'address query parameter is required', code: 'bad_address', status: 400 };
+  // A pattern is not a mailbox: `*@domain` names no inbox to read or write.
+  if (local.includes('*')) {
+    return { error: 'address must be one concrete mailbox, not a pattern', code: 'bad_address', status: 400 };
+  }
+  const hit = resolveAppPassword(secret, address, 'api');
+  if (!hit) return { error: 'this app password does not grant API access to that address', code: 'forbidden', status: 403 };
+  store.touchAppPassword(hit.row.id);
+  return { hit };
+};
+const mailboxOf = (q) => (q.get('mailbox') === 'Sent' ? 'Sent' : 'INBOX');
+
+Object.assign(routes, {
+  'GET /api/mailbox/messages': async (req, res) => {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const address = q.get('address');
+    const auth = mailboxAuth(req, address);
+    if (auth.error) return json(res, auth.status, { error: auth.error, code: auth.code });
+    const limit = Math.min(Number(q.get('limit')) || 50, 200);
+    const beforeUid = q.get('before') ? Number(q.get('before')) : null;
+    const messages = store.listPagedForAddress(auth.hit.userId, mailboxOf(q), address, { limit, beforeUid });
+    return json(res, 200, {
+      address: address.toLowerCase(),
+      mailbox: mailboxOf(q),
+      messages,
+      nextBefore: messages.length === limit ? messages[messages.length - 1].uid : null,
+    });
+  },
+});
+
+// Parameterized mailbox routes: /api/mailbox/messages/:uid/{raw,flags}.
+const MAILBOX_UID_ROUTE = /^\/api\/mailbox\/messages\/(\d+)\/(raw|flags)$/;
+async function handleMailboxUid(req, res, rawBody, match) {
+  const uid = Number(match[1]);
+  const leaf = match[2];
+  const q = new URL(req.url, 'http://x').searchParams;
+  const body = rawBody?.length ? JSON.parse(rawBody.toString()) : {};
+  const address = q.get('address') || body.address;
+  const auth = mailboxAuth(req, address);
+  if (auth.error) return json(res, auth.status, { error: auth.error, code: auth.code });
+  const mailbox = body.mailbox === 'Sent' ? 'Sent' : mailboxOf(q);
+
+  if (leaf === 'raw') {
+    if (req.method !== 'GET') return json(res, 405, { error: 'use GET', code: 'bad_method' });
+    const bytes = store.rawForAddress(auth.hit.userId, mailbox, address, uid);
+    if (!bytes) return json(res, 404, { error: 'no such message for that address', code: 'no_raw' });
+    res.writeHead(200, { 'content-type': 'message/rfc822' });
+    return res.end(bytes);
+  }
+  if (req.method !== 'POST') return json(res, 405, { error: 'use POST', code: 'bad_method' });
+  const ok = store.setFlagsForAddress(auth.hit.userId, mailbox, address, uid, String(body.flags ?? ''));
+  if (!ok) return json(res, 404, { error: 'no such message for that address', code: 'no_message' });
+  return json(res, 200, { ok: true, uid, flags: String(body.flags ?? '') });
+}
 
 // ---- static UI ----------------------------------------------------------------
 // Serves ui/dist when present (built SPA); the UI calls the admin API same-origin.
@@ -488,15 +598,39 @@ function serveUi(req, res) {
   } catch { return false; }
 }
 
+// The table is exact-path; the few routes with an id in the path are matched here.
+const PARAM_ROUTES = [
+  { rx: MAILBOX_UID_ROUTE, handler: handleMailboxUid },
+  {
+    rx: /^\/api\/admin\/app-passwords\/(\d+)$/,
+    handler: async (req, res, _raw, match) => {
+      if (req.method !== 'DELETE') return json(res, 405, { error: 'use DELETE', code: 'bad_method' });
+      if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+      return store.deleteAppPassword(Number(match[1]))
+        ? json(res, 200, { ok: true })
+        : json(res, 404, { error: 'no such app password', code: 'not_found' });
+    },
+  },
+];
+
 const handle = async (req, res) => {
-  const handler = routes[`${req.method} ${new URL(req.url, 'http://x').pathname}`];
+  const pathname = new URL(req.url, 'http://x').pathname;
+  const handler = routes[`${req.method} ${pathname}`];
+  let param = null;
   if (!handler) {
+    for (const r of PARAM_ROUTES) {
+      const m = r.rx.exec(pathname);
+      if (m) { param = { handler: r.handler, match: m }; break; }
+    }
+  }
+  if (!handler && !param) {
     if (serveUi(req, res)) return;
     return json(res, 404, { error: 'not found' });
   }
   try {
     const raw = req.method === 'GET' ? Buffer.alloc(0) : await readBody(req);
-    await handler(req, res, raw);
+    if (param) await param.handler(req, res, raw, param.match);
+    else await handler(req, res, raw);
   } catch (e) {
     json(res, e.status || 500, { error: e.message });
   }

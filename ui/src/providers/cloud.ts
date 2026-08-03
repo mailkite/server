@@ -8,6 +8,7 @@ import {
   type Capabilities,
   type MailProvider,
   type MessagePage,
+  type AppPassword,
   type Overview,
   type WebhookConfig,
   type WebhookStatus,
@@ -38,10 +39,16 @@ export class CloudProvider implements MailProvider {
   async credentials(): Promise<{ apiKeys: string[]; appPasswords: string[] }> {
     throw new NotImplemented("MailKite Cloud connection")
   }
+  async appPasswords(): Promise<AppPassword[]> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async deleteAppPassword(): Promise<void> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
   async createKey(): Promise<string> {
     throw new NotImplemented("MailKite Cloud connection")
   }
-  async createAppPassword(): Promise<string> {
+  async createAppPassword(): Promise<never> {
     throw new NotImplemented("MailKite Cloud connection")
   }
   async webhooks(): Promise<WebhookConfig[]> {
