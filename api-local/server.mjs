@@ -153,8 +153,22 @@ function resolveAppPassword(secret, address, protocol) {
   const pattern = pw.address || splitAddress(pw.username).local;
   if (!matchesAddress(pattern, address, scope)) return null;
   const { domain } = splitAddress(address);
-  return { userId: pw.user_id, domain, mailboxId: pw.mailbox_id ?? null, row: pw };
+  // A wildcard password is account-wide; a concrete one scopes the session to that
+  // address, so IMAP shows exactly what the REST routes would. The edge echoes
+  // mailboxId back on every read, so this needs no edge change.
+  const wildcard = String(pattern).includes('*');
+  return {
+    userId: pw.user_id,
+    domain,
+    mailboxId: pw.mailbox_id ?? (wildcard ? null : address.toLowerCase()),
+    row: pw,
+  };
 }
+
+// mailboxId carries the session's address scope for address-scoped app passwords
+// (numeric/absent values are legacy account-wide sessions).
+const addressScope = (mailboxId) =>
+  typeof mailboxId === 'string' && mailboxId.includes('@') ? mailboxId.toLowerCase() : null;
 
 const routes = {
   // ---- inbound ---------------------------------------------------------------
@@ -274,20 +288,20 @@ const routes = {
 
   'POST /api/imap/status': async (req, res, raw) => {
     if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-    const { userId, mailbox } = JSON.parse(raw.toString() || '{}');
-    return json(res, 200, store.status(userId, mailbox));
+    const { userId, mailbox, mailboxId } = JSON.parse(raw.toString() || '{}');
+    return json(res, 200, store.status(userId, mailbox, addressScope(mailboxId)));
   },
 
   'POST /api/imap/list': async (req, res, raw) => {
     if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-    const { userId, mailbox } = JSON.parse(raw.toString() || '{}');
-    return json(res, 200, { messages: store.list(userId, mailbox) });
+    const { userId, mailbox, mailboxId } = JSON.parse(raw.toString() || '{}');
+    return json(res, 200, { messages: store.list(userId, mailbox, addressScope(mailboxId)) });
   },
 
   'POST /api/imap/raw': async (req, res, raw) => {
     if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-    const { userId, mailbox, uid } = JSON.parse(raw.toString() || '{}');
-    const bytes = store.raw(userId, mailbox, uid);
+    const { userId, mailbox, uid, mailboxId } = JSON.parse(raw.toString() || '{}');
+    const bytes = store.raw(userId, mailbox, uid, addressScope(mailboxId));
     if (!bytes) return json(res, 404, { error: 'raw unavailable', code: 'no_raw' });
     res.writeHead(200, { 'content-type': 'message/rfc822' });
     return res.end(bytes);
@@ -295,8 +309,10 @@ const routes = {
 
   'POST /api/imap/flags': async (req, res, raw) => {
     if (!edgeAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-    const { userId, mailbox, uid, flags } = JSON.parse(raw.toString() || '{}');
-    store.setFlags(userId, mailbox, uid, String(flags || ''));
+    const { userId, mailbox, uid, flags, mailboxId } = JSON.parse(raw.toString() || '{}');
+    const scope = addressScope(mailboxId);
+    if (scope) store.setFlagsForAddress(userId, mailbox, scope, uid, String(flags || ''));
+    else store.setFlags(userId, mailbox, uid, String(flags || ''));
     return json(res, 200, { ok: true });
   },
 };

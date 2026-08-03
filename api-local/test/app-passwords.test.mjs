@@ -251,3 +251,31 @@ test('CLI add-app-password mints usable passwords', async () => {
 
   assert.match(run('list'), /app-passwords=/);
 });
+
+// An address-scoped password must see the same mail over IMAP as over the REST routes —
+// otherwise the scope the UI promises is fiction on the protocol most people use.
+test('IMAP sessions are scoped to the matched address', async () => {
+  const wild = (await newPw({ label: 'wide', domain: DOMAIN, address: '*', protocols: ['imap'] })).password;
+  const only = (await newPw({ label: 'one', domain: DOMAIN, address: 'scoped', protocols: ['imap'] })).password;
+
+  await ingest(`scoped@${DOMAIN}`, 'for the scoped mailbox');
+  await ingest(`other@${DOMAIN}`, 'for a different mailbox');
+
+  const asWild = await imapAuth(`scoped@${DOMAIN}`, wild);
+  assert.equal(asWild.ok, true);
+  assert.equal(asWild.mailboxId, null, 'wildcard password stays account-wide');
+  const wildList = await (await edge('/api/imap/list', { userId: asWild.userId, mailboxId: asWild.mailboxId, mailbox: 'INBOX' })).json();
+  assert.ok(wildList.messages.length >= 2, 'account-wide session sees every address');
+
+  const asScoped = await imapAuth(`scoped@${DOMAIN}`, only);
+  assert.equal(asScoped.ok, true);
+  assert.equal(asScoped.mailboxId, `scoped@${DOMAIN}`, 'concrete password scopes the session');
+  const scoped = await (await edge('/api/imap/list', { userId: asScoped.userId, mailboxId: asScoped.mailboxId, mailbox: 'INBOX' })).json();
+  assert.ok(scoped.messages.length >= 1, 'sees its own mail');
+  assert.ok(
+    scoped.messages.every((m) => (m.to_addr || '').toLowerCase() === `scoped@${DOMAIN}`),
+    'never sees another address on the same account',
+  );
+  const st = await (await edge('/api/imap/status', { userId: asScoped.userId, mailboxId: asScoped.mailboxId, mailbox: 'INBOX' })).json();
+  assert.equal(st.total, scoped.messages.length, 'STATUS agrees with LIST');
+});

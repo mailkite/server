@@ -478,21 +478,31 @@ export class Store {
           AND domain IS NOT NULL ORDER BY username`).all(userId).map((r) => r.username);
   }
 
-  status(userId, mailbox) {
+  // The IMAP read paths take the same optional address scope as the REST routes, so an
+  // address-scoped app password sees the same mail through either protocol. `address`
+  // null = account-wide (a `*` password, or a legacy account-wide session).
+  status(userId, mailbox, address = null) {
     const box = this.mailbox(userId, mailbox);
-    const t = this.db.prepare('SELECT COUNT(*) c FROM messages WHERE user_id = ? AND mailbox = ?')
-      .get(userId, mailbox).c;
+    const col = Store.addressColumn(mailbox);
+    const scope = address ? ` AND lower(${col}) = ?` : '';
+    const args = address ? [userId, mailbox, String(address).toLowerCase()] : [userId, mailbox];
+    const t = this.db.prepare(`SELECT COUNT(*) c FROM messages WHERE user_id = ? AND mailbox = ?${scope}`)
+      .get(...args).c;
     const u = this.db.prepare(
-      "SELECT COUNT(*) c FROM messages WHERE user_id = ? AND mailbox = ? AND instr(' '||flags||' ', ' Seen ') = 0")
-      .get(userId, mailbox).c;
+      `SELECT COUNT(*) c FROM messages WHERE user_id = ? AND mailbox = ?${scope} AND instr(' '||flags||' ', ' Seen ') = 0`)
+      .get(...args).c;
     return { total: t, unseen: u, uidvalidity: box.uidvalidity, uidnext: box.uidnext };
   }
-  list(userId, mailbox) {
+  list(userId, mailbox, address = null) {
+    const col = Store.addressColumn(mailbox);
+    const scope = address ? ` AND lower(${col}) = ?` : '';
+    const args = address ? [userId, mailbox, String(address).toLowerCase()] : [userId, mailbox];
     return this.db.prepare(
       `SELECT uid, flags, internaldate, from_addr, to_addr, subject
-         FROM messages WHERE user_id = ? AND mailbox = ? ORDER BY uid`).all(userId, mailbox);
+         FROM messages WHERE user_id = ? AND mailbox = ?${scope} ORDER BY uid`).all(...args);
   }
-  raw(userId, mailbox, uid) {
+  raw(userId, mailbox, uid, address = null) {
+    if (address) return this.rawForAddress(userId, mailbox, address, uid);
     const r = this.db.prepare('SELECT blob FROM messages WHERE user_id = ? AND mailbox = ? AND uid = ?')
       .get(userId, mailbox, uid);
     return r ? this.getBlob(r.blob) : null;

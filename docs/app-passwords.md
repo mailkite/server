@@ -51,6 +51,10 @@ whether you're routing mail or granting access to it.
 
 ## Auth semantics
 
+- An **address-scoped password scopes the IMAP session too**: `/api/imap/auth` returns
+  the matched address as `mailboxId`, and the edge echoes it on every read, so a
+  `hello`-scoped password sees the same mail over IMAP as over the REST routes. A `*`
+  password stays account-wide.
 - App passwords are **user-trust** credentials (like API keys), never edge-trust. The IMAP edge
   keeps calling `POST /api/imap/auth` (HMAC) — the backend now resolves the username
   against app passwords and answers with the matched account/mailbox.
