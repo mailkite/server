@@ -260,13 +260,18 @@ const routes = {
 
 // ---- console auth endpoints ------------------------------------------------------
 Object.assign(routes, {
-  // Always {ok:true} — no account enumeration. Rate-limited per IP (5 / 15 min).
+  // Always {ok:true} for unknown emails — no account enumeration. Rate limiting counts
+  // *failed* attempts only (10 / 15 min) and resets on success: an admin signing in
+  // repeatedly must never lock themselves out, and a locked-out caller gets an explicit
+  // 429 rather than a silent "check your email" that never arrives.
   'POST /api/auth/request-link': async (req, res, raw) => {
     const ip = 'link:' + clientIp(req);
-    if (store.lockedOut(ip, 5)) return json(res, 200, { ok: true });
-    store.authFail(ip);
+    if (store.lockedOut(ip, 10)) {
+      return json(res, 429, { error: 'Too many sign-in attempts. Try again in a few minutes.', code: 'rate_limited' });
+    }
     const { email } = JSON.parse(raw.toString() || '{}');
     if (typeof email === 'string' && store.isAdminUser(email)) {
+      store.authOk(ip); // known admin — clear any accumulated failures
       // No way to deliver mail → emailing a link would strand the admin in the server
       // log. In that mode knowing the admin address IS the credential: sign in directly.
       // (Deliberate: enumeration is moot when the email is the credential; per-IP rate
@@ -279,7 +284,9 @@ Object.assign(routes, {
       }
       const token = store.createLoginToken(email);
       await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
+      return json(res, 200, { ok: true });
     }
+    store.authFail(ip); // unknown email — this is what the limiter is for
     return json(res, 200, { ok: true });
   },
   'POST /api/auth/verify': async (req, res, raw) => {

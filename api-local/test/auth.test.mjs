@@ -237,3 +237,35 @@ test('mail channel configured: magic link required (no direct sign-in)', async (
   const s = await (await fetch(BASE + '/api/auth/status')).json();
   assert.equal(s.mailChannel, true);
 });
+
+test('rate limiting counts failures only and resets for known admins', async () => {
+  const P4 = PORT + 3;
+  const B4 = `http://127.0.0.1:${P4}`;
+  const dir4 = mkdtempSync(join(tmpdir(), 'mk-rate-'));
+  const p4 = spawn('node', [join(dir, 'server.mjs')], {
+    env: { ...process.env, DATA_DIR: dir4, HMAC_SECRET: SECRET, PORT: String(P4), ADMIN_EMAIL: ADMIN, SMARTHOST: '', MAILKITE_SEND_KEY: '' },
+    stdio: 'ignore',
+  });
+  const ask = (email) => fetch(B4 + '/api/auth/request-link', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email }),
+  });
+  try {
+    for (let i = 0; i < 60; i++) {
+      try { await fetch(B4 + '/api/auth/status'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    // An admin signing in many times must never lock themselves out.
+    for (let i = 0; i < 15; i++) {
+      const r = await ask(ADMIN);
+      assert.equal(r.status, 200, `admin attempt ${i + 1} not rate-limited`);
+      assert.equal((await r.json()).signedIn, true);
+    }
+    // Unknown emails do accumulate, and the limit answers 429 (not a silent ok).
+    for (let i = 0; i < 10; i++) await ask(`nobody${i}@nowhere.example`);
+    assert.equal((await ask('nobody@nowhere.example')).status, 429, 'unknown-email flood is limited');
+    // …and a real admin is rescued by the success reset.
+    assert.equal((await ask(ADMIN)).status, 429, 'limiter applies before identity is known');
+  } finally {
+    p4.kill();
+    rmSync(dir4, { recursive: true, force: true });
+  }
+});
