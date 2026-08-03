@@ -115,6 +115,29 @@ function metaFrom(raw, extra = {}) {
   };
 }
 
+// The A record for a mail host must point at this server, so tell the web console what
+// this server's public address actually is instead of making the admin look it up:
+// resolve the hostname they're browsing (already public by definition), and fall back to
+// the local address of the connection they arrived on. Behind a proxy/NAT the latter is
+// private, so it is only reported when it isn't in an RFC1918/loopback/CGNAT range.
+const IPV4_RE = /^\d{1,3}(\.\d{1,3}){3}$/;
+const isPrivateV4 = (ip) => /^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(ip);
+const publicIpCache = new Map();
+async function detectPublicIp(req) {
+  const host = String(req.headers.host || '').split(':')[0];
+  if (IPV4_RE.test(host) && !isPrivateV4(host)) return host;
+  if (host && host !== 'localhost') {
+    if (publicIpCache.has(host)) return publicIpCache.get(host);
+    try {
+      const { resolve4 } = await import('node:dns/promises');
+      const [ip] = await resolve4(host);
+      if (ip) { publicIpCache.set(host, ip); return ip; }
+    } catch { /* unresolvable (fresh install, split-horizon DNS) — fall through */ }
+  }
+  const local = String(req.socket.localAddress || '').replace(/^::ffff:/, '');
+  return IPV4_RE.test(local) && !isPrivateV4(local) ? local : null;
+}
+
 const routes = {
   // ---- inbound ---------------------------------------------------------------
   'POST /api/ingest': async (req, res, raw) => {
@@ -340,6 +363,7 @@ Object.assign(routes, {
     const u = store.defaultUser();
     return json(res, 200, {
       domains: store.domains().length,
+      publicIp: await detectPublicIp(req),
       inbox: store.status(u, 'INBOX'),
       sent: store.status(u, 'Sent'),
       capabilities: {

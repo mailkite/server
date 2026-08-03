@@ -30,6 +30,8 @@ export type MailboxStatus = { total: number; unseen: number }
 
 export type Overview = {
   domains: number
+  /** This server's public IPv4, detected from the hostname you're browsing. */
+  publicIp: string | null
   inbox: MailboxStatus
   sent: MailboxStatus
   capabilities: Capabilities

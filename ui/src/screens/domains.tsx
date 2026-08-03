@@ -15,7 +15,7 @@ import { errMsg } from "@/lib/format"
 import { useProvider } from "@/providers/context"
 import { cn } from "@/lib/utils"
 
-function DnsRecords({ domain }: { domain: string }) {
+function DnsRecords({ domain, publicIp }: { domain: string; publicIp: string | null }) {
   const [mailHost, setMailHost] = useState(`mail.${domain}`)
   return (
     <div className="space-y-2 border-t border-border p-4">
@@ -37,7 +37,7 @@ function DnsRecords({ domain }: { domain: string }) {
         deliverability suffers without it.
       </p>
       <div className="grid gap-2">
-        <ValueRow label={`A — ${mailHost}`} value="<this server's public IP>" />
+        <ValueRow label={`A — ${mailHost}`} value={publicIp || "<this server's public IP>"} />
         <ValueRow label={`MX — ${domain}`} value={`10 ${mailHost}`} />
         <ValueRow label={`TXT (SPF) — ${domain}`} value={`v=spf1 a:${mailHost} -all`} />
         <ValueRow label={`TXT (DMARC) — _dmarc.${domain}`} value={`v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}`} />
@@ -66,6 +66,8 @@ export function DomainsScreen() {
   const [open, setOpen] = useState<string | null>(null)
 
   const domains = useQuery({ queryKey: ["domains"], queryFn: () => provider.domains() })
+  // The A record needs this server's address — detect it rather than making the admin look it up.
+  const overview = useQuery({ queryKey: ["overview"], queryFn: () => provider.overview() })
   const add = useMutation({
     mutationFn: (domain: string) => provider.addDomain(domain),
     onSuccess: (_, domain) => {
@@ -137,7 +139,7 @@ export function DomainsScreen() {
                   <ChevronDown className={cn("size-4 transition-transform", open === d && "rotate-180")} />
                 </span>
               </button>
-              {open === d && <DnsRecords domain={d} />}
+              {open === d && <DnsRecords domain={d} publicIp={overview.data?.publicIp ?? null} />}
             </Card>
           ))}
         </div>
