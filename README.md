@@ -5,9 +5,9 @@ Haraka-based SMTP (MX + submission) and a thin IMAP head, designed around one sm
 backend contract — run it fully self-hosted, or point the same components at
 [MailKite Cloud](https://mailkite.dev) and skip the ops.
 
-> Status: **pre-release.** The SMTP/IMAP edges here run in production at MailKite, and
-> the reference backend passes the conformance + end-to-end suites; the UI (`ui/`) lands
-> next. Watch releases for v0.1.0.
+> Status: **pre-1.0.** The SMTP/IMAP edges here run MailKite's production mail; the
+> reference SQLite backend and web console are new (first public release 2026-08-01,
+> now v0.5.0) and pass the conformance + end-to-end suites.
 
 ## What's in the box
 
