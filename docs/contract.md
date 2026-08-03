@@ -90,8 +90,15 @@ Called by `mta-submit/plugins/mailkite_relay.js` after successful AUTH.
 ## IMAP read API
 
 All five endpoints are **edge-trusted**: `Authorization: Bearer <hmac secret>`, JSON
-bodies. `mailbox` is `"INBOX"` or `"Sent"` (v1). `mailboxId` scopes a session to one
-mailbox address; `null` = account-wide.
+bodies. `mailbox` is `"INBOX"` or `"Sent"` (v1).
+
+`mailboxId` is an **opaque session-scope token**: whatever `/api/imap/auth` returns, the
+edge echoes back on every read of that session, and the backend interprets. `null` means
+account-wide. Implementations choose their own representation — `api-local` returns the
+matched address string, MailKite Cloud returns a mailboxes row id — so treat it as
+meaningless outside the backend that issued it. An address-scoped app password **must**
+produce a non-null scope, or the session would read the whole account's mail over IMAP
+while the same credential is correctly restricted over the mailbox REST routes.
 
 ### `POST /api/imap/auth`
 
