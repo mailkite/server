@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const SECRET = 'dedupe-test-secret';
-const PORT = 18789;
+const PORT = 21000 + (process.pid % 900);
 const BASE = `http://127.0.0.1:${PORT}`;
 const dir = new URL('..', import.meta.url).pathname;
 let proc, dataDir, apiKey;

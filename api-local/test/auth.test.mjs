@@ -11,7 +11,7 @@ import { join } from 'node:path';
 import { Store } from '../lib/db.mjs';
 
 const SECRET = 'auth-test-secret';
-const PORT = 18791;
+const PORT = 22000 + (process.pid % 900);
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN = 'gabe@admin.example';
 const dir = new URL('..', import.meta.url).pathname;

@@ -13,7 +13,7 @@ import { join } from 'node:path';
 
 const EXTERNAL = !!process.env.BACKEND_URL;
 const SECRET = process.env.HMAC_SECRET || 'test-secret';
-const PORT = 18787;
+const PORT = 19000 + (process.pid % 900);
 let BASE = process.env.BACKEND_URL || `http://127.0.0.1:${PORT}`;
 const dir = new URL('..', import.meta.url).pathname;
 

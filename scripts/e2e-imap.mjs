@@ -19,7 +19,7 @@ import { connect } from 'node:tls';
 
 const ROOT = new URL('..', import.meta.url).pathname;
 const SECRET = 'e2e-secret';
-const API_PORT = 18790, IMAP_PORT = 19993;
+const API_PORT = 24000 + (process.pid % 900), IMAP_PORT = 25000 + (process.pid % 900);
 const tmp = mkdtempSync(join(tmpdir(), 'mk-e2e-'));
 const procs = [];
 const cleanup = (code) => { procs.forEach((p) => p.kill()); rmSync(tmp, { recursive: true, force: true }); process.exit(code); };

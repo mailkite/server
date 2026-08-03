@@ -14,8 +14,8 @@ import { runDue, signPayload, BACKOFF_MS, MAX_ATTEMPTS } from '../lib/webhooks.m
 
 const dir = new URL('..', import.meta.url).pathname;
 const SECRET = 'webhook-test-secret';
-const PORT = 18810;
-const HOOK_PORT = 18811;
+const PORT = 23000 + (process.pid % 900);
+const HOOK_PORT = PORT + 1;
 const BASE = `http://127.0.0.1:${PORT}`;
 
 let proc, dataDir, receiver, received, respondWith;

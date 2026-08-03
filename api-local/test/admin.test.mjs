@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const SECRET = 'admin-test-secret';
-const PORT = 18788;
+const PORT = 20000 + (process.pid % 900);
 const BASE = `http://127.0.0.1:${PORT}`;
 const dir = new URL('..', import.meta.url).pathname;
 let proc, dataDir;
