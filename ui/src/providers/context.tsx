@@ -47,7 +47,8 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       const email = await whoami()
       if (cancelled) return
       if (email) setConnection({ provider: "local", mode: "cookie", email, config: { baseUrl: "" } })
-      else setConnection(readSecretConnection())
+      // Don't clobber a sign-in that completed while this boot check was in flight.
+      else setConnection((c) => c ?? readSecretConnection())
       setStatus("ready")
     })()
     return () => { cancelled = true }

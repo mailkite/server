@@ -451,7 +451,14 @@ function serveUi(req, res) {
   if (!existsFs(file)) file = joinPath(UI_DIR, 'index.html'); // SPA fallback
   try {
     const body = readFs(file);
-    res.writeHead(200, { 'content-type': MIME[file.split('.').pop()] || 'application/octet-stream' });
+    // index.html must never be cached: a stale copy points at asset hashes this build
+    // no longer has, so the app silently runs (or fails as) an old version after a
+    // deploy. Hashed assets are immutable by construction, so cache them hard.
+    const isHtml = file.endsWith('.html');
+    res.writeHead(200, {
+      'content-type': MIME[file.split('.').pop()] || 'application/octet-stream',
+      'cache-control': isHtml ? 'no-store, must-revalidate' : 'public, max-age=31536000, immutable',
+    });
     res.end(body);
     return true;
   } catch { return false; }
