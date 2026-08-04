@@ -152,7 +152,12 @@ test('email setup: a key the send API rejects is never stored', async () => {
   sendBehaviour = 'reject';
   const r = await ui('/api/auth/setup/email', { mode: 'cloud', key: 'mk_live_wrong', from: 'no-reply@setup.example' });
   assert.equal(r.status, 400);
-  assert.equal((await r.json()).code, 'send_failed');
+  const rejected = await r.json();
+  // The failure is named specifically, and the admin is told what to do about it —
+  // no upstream JSON, no stack, no bare status code.
+  assert.equal(rejected.code, 'bad_key');
+  assert.match(rejected.error, /rejected that API key/i);
+  assert.ok(!/[{}]|Error:/.test(rejected.error), `message must stay human: ${rejected.error}`);
 
   const state = await (await ui('/api/auth/setup-state')).json();
   assert.equal(state.state, 'setup', 'still owed — a failed proof changes nothing');
@@ -325,7 +330,12 @@ test('setup works for the HMAC bearer, not just a cookie session', async () => {
   });
   // Reaches the send attempt (and fails there) rather than 401ing on auth.
   assert.equal(r.status, 400);
-  assert.equal((await r.json()).code, 'send_failed');
+  const rejected = await r.json();
+  // The failure is named specifically, and the admin is told what to do about it —
+  // no upstream JSON, no stack, no bare status code.
+  assert.equal(rejected.code, 'bad_key');
+  assert.match(rejected.error, /rejected that API key/i);
+  assert.ok(!/[{}]|Error:/.test(rejected.error), `message must stay human: ${rejected.error}`);
 
   const anon = await fetch(BASE + '/api/auth/setup-state');
   assert.equal(anon.status, 401, 'no credential is still refused');

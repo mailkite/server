@@ -3,8 +3,28 @@
 
 const HDRS = { "x-mailkite-ui": "1", "content-type": "application/json" }
 
+/**
+ * The admin secret from the "Advanced" connect path, if that's how we're connected.
+ * Setup runs before any cookie session exists on a scripted/loopback install, so these
+ * calls must present the same credential the rest of the app uses — without it the
+ * server correctly answers "not signed in" and setup is unreachable.
+ */
+function storedSecret(): string | null {
+  try {
+    const raw = localStorage.getItem("mk-server-conn")
+    return raw ? (JSON.parse(raw)?.config?.secret ?? null) : null
+  } catch {
+    return null
+  }
+}
+
+function authHeaders(): Record<string, string> {
+  const secret = storedSecret()
+  return secret ? { ...HDRS, authorization: `Bearer ${secret}` } : HDRS
+}
+
 async function post(path: string, body: unknown): Promise<Response> {
-  return fetch(path, { method: "POST", headers: HDRS, body: JSON.stringify(body) })
+  return fetch(path, { method: "POST", headers: authHeaders(), body: JSON.stringify(body) })
 }
 
 /**
@@ -40,7 +60,7 @@ export type AuthStatus = {
 export async function authStatus(): Promise<AuthStatus> {
   const fallback: AuthStatus = { needsSetup: false, setupRequired: false, method: null, mailChannel: true }
   try {
-    const res = await fetch("/api/auth/status", { headers: { "x-mailkite-ui": "1" } })
+    const res = await fetch("/api/auth/status", { headers: authHeaders() })
     if (!res.ok) return fallback
     return { ...fallback, ...((await res.json()) as Partial<AuthStatus>) }
   } catch {
@@ -60,7 +80,7 @@ export type SetupState = {
 }
 
 export async function setupState(): Promise<SetupState> {
-  const res = await fetch("/api/auth/setup-state", { headers: { "x-mailkite-ui": "1" } })
+  const res = await fetch("/api/auth/setup-state", { headers: authHeaders() })
   if (!res.ok) throw new Error("Could not read setup state.")
   return (await res.json()) as SetupState
 }
@@ -102,7 +122,7 @@ export async function completeSetup(email: string): Promise<string> {
 /** Who the session cookie says we are, or null. */
 export async function whoami(): Promise<string | null> {
   try {
-    const res = await fetch("/api/auth/me", { headers: { "x-mailkite-ui": "1" } })
+    const res = await fetch("/api/auth/me", { headers: authHeaders() })
     if (!res.ok) return null
     const { email } = await res.json()
     return email ?? null

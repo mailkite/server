@@ -162,8 +162,8 @@ export function AuthSetupScreen({ onDone }: { onDone: () => void }) {
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><ShieldCheck className="size-4 text-primary" /> Finish sign-in setup</CardTitle>
           <CardDescription>
-            You&rsquo;re in on the one session this install granted when you claimed it. Choose how you&rsquo;ll
-            sign in from now on — the server proves the method works before saving it.
+            Choose how you&rsquo;ll
+            sign in from now on — the server proves the method works before saving it. Until you finish, you can still sign in with your admin email.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">

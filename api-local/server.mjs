@@ -529,7 +529,10 @@ Object.assign(routes, {
       await sendSetupCode({ method, settings, to: email, code, sendUrl: SEND_URL });
     } catch (e) {
       // Proof failed → nothing stored. This is the whole point of the flow.
-      return json(res, 400, { error: `Couldn't send the verification email — ${e.message}`, code: 'send_failed' });
+      // The admin gets a sentence they can act on; the raw upstream detail goes to the log.
+      const f = e.friendly || { error: "Couldn't send the verification email.", code: 'send_failed', detail: e.message };
+      console.error(`sign-in setup: ${f.code} — ${f.detail || e.message}`);
+      return json(res, 400, { error: f.error, code: f.code });
     }
     store.putPendingSetup('email', { method, settings, codeHash: hashCode(code), email });
     console.log(`sign-in setup: verification code sent to ${email} via ${method}`);

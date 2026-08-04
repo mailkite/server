@@ -8,6 +8,7 @@
 //
 // Zero npm deps: fetch + node:crypto only.
 
+import { cloudSendError, transportError } from './errors.mjs';
 import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import { sendViaSmtp } from './smarthost.mjs';
 
@@ -131,19 +132,30 @@ const codeBody = (code) =>
  */
 export async function sendSetupCode({ method, settings, to, code, sendUrl }) {
   if (method === 'email_cloud') {
-    const res = await fetch(sendUrl, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${settings.key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ from: settings.from, to, subject: CODE_SUBJECT, text: codeBody(code) }),
-    });
+    let res;
+    try {
+      res = await fetch(sendUrl, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${settings.key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ from: settings.from, to, subject: CODE_SUBJECT, text: codeBody(code) }),
+      });
+    } catch (e) {
+      throw Object.assign(new Error('cloud unreachable'), { friendly: transportError(e) });
+    }
     if (!res.ok) {
       const detail = await res.text().catch(() => '');
-      throw new Error(`the send API rejected the key (${res.status})${detail ? `: ${detail.slice(0, 200)}` : ''}`);
+      throw Object.assign(new Error('cloud send rejected'), { friendly: cloudSendError(res.status, detail) });
     }
     return true;
   }
   if (method === 'email_smtp') {
-    await sendViaSmtp(smtpCfg(settings), { from: settings.from, to, subject: CODE_SUBJECT, text: codeBody(code) });
+    try {
+      await sendViaSmtp(smtpCfg(settings), { from: settings.from, to, subject: CODE_SUBJECT, text: codeBody(code) });
+    } catch (e) {
+      throw Object.assign(new Error('smtp send failed'), {
+        friendly: transportError(e, { host: settings.host, port: settings.port }),
+      });
+    }
     return true;
   }
   throw new Error(`not an email method: ${method}`);
