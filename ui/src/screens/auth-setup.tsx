@@ -3,7 +3,7 @@
 // sign-ins are verified — and the choice only sticks once the server has proven it
 // works: a code that came back, or a completed OAuth round trip.
 
-import { useState, type FormEvent } from "react"
+import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery } from "@tanstack/react-query"
 import { KeyRound, Mail, Server, ShieldCheck } from "lucide-react"
 import { toast } from "sonner"
@@ -11,9 +11,10 @@ import { Logo } from "@/components/logo"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { cn } from "@/lib/utils"
 import { errMsg } from "@/lib/format"
-import { setupState, startEmailSetup, startOauthSetup, verifyEmailSetup, type SmtpFields } from "@/providers/auth"
+import { cloudSendingDomains, setupState, startEmailSetup, startOauthSetup, verifyEmailSetup, type SmtpFields } from "@/providers/auth"
 
 type Choice = "cloud" | "smtp" | "oauth"
 
@@ -57,9 +58,35 @@ export function AuthSetupScreen({ onDone }: { onDone: () => void }) {
   const state = useQuery({ queryKey: ["setup-state"], queryFn: setupState, staleTime: 0 })
   const [choice, setChoice] = useState<Choice>("cloud")
   const [key, setKey] = useState("")
-  const [from, setFrom] = useState("")
+  // From is composed: a local part plus a domain the cloud account can send from.
+  const [fromLocal, setFromLocal] = useState("hello")
+  const [fromDomain, setFromDomain] = useState("")
+  const [sendingDomains, setSendingDomains] = useState<string[]>([])
+  const [lookingUp, setLookingUp] = useState(false)
   const [smtp, setSmtp] = useState<SmtpFields>({ host: "", port: "587", user: "", pass: "", from: "" })
   const [provider, setProvider] = useState<"google" | "github">("google")
+
+  // Once a plausible key is entered, ask which domains it may send from and default to
+  // the first — the admin should not have to know, or type, what the cloud already knows.
+  useEffect(() => {
+    const k = key.trim()
+    if (!k.startsWith("mk_live_") || k.length < 20) {
+      setSendingDomains([])
+      return
+    }
+    let cancelled = false
+    setLookingUp(true)
+    const t = setTimeout(() => {
+      cloudSendingDomains(k)
+        .then((domains) => {
+          if (cancelled) return
+          setSendingDomains(domains)
+          if (domains.length) setFromDomain((d) => (d && domains.includes(d) ? d : domains[0]))
+        })
+        .finally(() => !cancelled && setLookingUp(false))
+    }, 400)
+    return () => { cancelled = true; clearTimeout(t); setLookingUp(false) }
+  }, [key])
   const [clientId, setClientId] = useState("")
   const [clientSecret, setClientSecret] = useState("")
   const [allowed, setAllowed] = useState("")
@@ -68,7 +95,7 @@ export function AuthSetupScreen({ onDone }: { onDone: () => void }) {
 
   const send = useMutation({
     mutationFn: () => (choice === "cloud"
-      ? startEmailSetup({ mode: "cloud", key: key.trim(), from: from.trim() })
+      ? startEmailSetup({ mode: "cloud", key: key.trim(), from: fromLocal.trim() && fromDomain.trim() ? `${fromLocal.trim()}@${fromDomain.trim()}` : "" })
       : startEmailSetup({ mode: "smtp", smtp })),
     onSuccess: (r) => {
       setSentTo(r.to)
@@ -180,7 +207,47 @@ export function AuthSetupScreen({ onDone }: { onDone: () => void }) {
                 working outbound path.
               </p>
               <Input aria-label="MailKite Cloud API key" type="password" placeholder="mk_live_…" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
-              <Input aria-label="From address" placeholder="From address — no-reply@a-domain-verified-in-your-cloud-account.com" value={from} onChange={(e) => setFrom(e.target.value)} autoComplete="off" spellCheck={false} />
+              {/* From reads as an address: local part, @, one of the domains the cloud
+                  account can actually send from (looked up once a key is entered). */}
+              <div className="flex items-center gap-1.5">
+                <Input
+                  aria-label="From address"
+                  className="flex-1 font-mono text-sm"
+                  placeholder="hello"
+                  value={fromLocal}
+                  onChange={(e) => setFromLocal(e.target.value)}
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <span aria-hidden className="font-mono text-sm text-muted-foreground">@</span>
+                {sendingDomains.length ? (
+                  <Select value={fromDomain} onValueChange={setFromDomain}>
+                    <SelectTrigger aria-label="Sending domain" className="w-[52%] font-mono text-sm">
+                      <SelectValue placeholder="Pick a domain" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {sendingDomains.map((d) => (
+                        <SelectItem key={d} value={d} className="font-mono">{d}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <Input
+                    aria-label="Sending domain"
+                    className="w-[52%] font-mono text-sm"
+                    placeholder={lookingUp ? "checking your account…" : "yourdomain.com"}
+                    value={fromDomain}
+                    onChange={(e) => setFromDomain(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                )}
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {sendingDomains.length
+                  ? "Domains your MailKite Cloud account has verified for sending."
+                  : "Must be a domain verified in your MailKite Cloud account — not necessarily one this server hosts."}
+              </p>
               <Button type="submit" className="w-full" disabled={send.isPending || !key.trim()}>
                 {send.isPending ? "Sending a test email…" : "Send verification code"}
               </Button>

@@ -102,6 +102,22 @@ export async function startEmailSetup(input: { mode: "cloud"; key: string; from:
   return postOrThrow("/api/auth/setup/email", body) as Promise<{ sent: boolean; to: string }>
 }
 
+/**
+ * Which domains this cloud key may send from. The server asks the cloud, because a domain
+ * this server hosts says nothing about what that cloud account has verified — guessing
+ * produces a domain_not_owned rejection at send time.
+ */
+export async function cloudSendingDomains(key: string): Promise<string[]> {
+  try {
+    const res = await post("/api/auth/setup/sending-domains", { key })
+    if (!res.ok) return []
+    const body = (await res.json()) as { domains?: string[] }
+    return Array.isArray(body.domains) ? body.domains : []
+  } catch {
+    return []
+  }
+}
+
 export async function verifyEmailSetup(code: string) {
   return postOrThrow("/api/auth/setup/email/verify", { code }) as Promise<{ method: AuthMethod }>
 }

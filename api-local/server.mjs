@@ -526,6 +526,16 @@ Object.assign(routes, {
 
   // Prove an email path: send a real code through the CANDIDATE config. Nothing is
   // persisted as authoritative here — a key that 401s fails loudly instead.
+  // Which domains a candidate cloud key may send from. The console asks before the admin
+  // types a From address, because a domain THIS server hosts says nothing about what the
+  // cloud account has verified — guessing yields a domain_not_owned rejection at send time.
+  'POST /api/auth/setup/sending-domains': async (req, res, raw) => {
+    if (!setupActor(req)) return json(res, 401, { error: 'not signed in' });
+    const { key } = JSON.parse(raw.toString() || '{}');
+    if (!key || typeof key !== 'string') return json(res, 400, { error: 'Enter an API key first.', code: 'bad_key' });
+    return json(res, 200, { domains: await cloudSendingDomains(key, SEND_URL) });
+  },
+
   'POST /api/auth/setup/email': async (req, res, raw) => {
     const email = setupActor(req);
     if (!email) return json(res, 401, { error: 'not signed in' });

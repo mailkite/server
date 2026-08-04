@@ -222,7 +222,7 @@ export function CredentialsScreen() {
             </div>
             <p id="pw-address-hint" className="text-xs text-muted-foreground">
               Leave blank for <code className="font-mono">*</code> — every address on the domain;{" "}
-              <code className="font-mono">hello</code> just that one;{" "} on the domain;{" "}
+              <code className="font-mono">hello</code> just that one;{" "}
               <code className="font-mono">support-*</code> and <code className="font-mono">*-agent</code> match a family.
             </p>
 

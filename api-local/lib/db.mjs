@@ -494,7 +494,17 @@ export class Store {
   }
 
   // Single-tenant convenience for the admin API / UI: one implicit account.
-  defaultUser() { return this.addUser('default'); }
+  /**
+   * The account the console acts as. A self-hoster who provisioned with the CLI has one
+   * user with some other name; assuming a literal 'default' account silently hid their
+   * domains and mail from the console. Adopt the existing account when there is exactly
+   * one, and only mint 'default' for a genuinely empty install.
+   */
+  defaultUser() {
+    const rows = this.db.prepare('SELECT id FROM users ORDER BY id ASC LIMIT 2').all();
+    if (rows.length === 1) return rows[0].id;
+    return this.addUser('default');
+  }
 
   listPaged(userId, mailbox, { limit = 50, beforeUid = null } = {}) {
     const rows = beforeUid
