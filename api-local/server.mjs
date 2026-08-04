@@ -392,9 +392,22 @@ Object.assign(routes, {
     }
     const { email } = JSON.parse(raw.toString() || '{}');
     const auth = effectiveAuth();
-    // Claimed but not set up: the claiming session still works, but no NEW session can
-    // be minted by typing an email. That window is one session long, by design.
-    if (!auth) return json(res, 200, { ok: true, setupRequired: true });
+    // Not set up yet: no verification method exists, so a known admin still signs in
+    // directly — the same posture as an unclaimed install, and the only one available
+    // when nothing can send mail. Restricting this to a single session bricked an admin
+    // who lost their cookie before finishing setup (recovery meant shell access), which
+    // is worse friction than the window it closed. The console gates every screen behind
+    // setup, and once a method is proven this branch is gone for good.
+    if (!auth) {
+      if (typeof email === 'string' && store.isAdminUser(email)) {
+        store.authOk(ip);
+        console.warn(`sign-in before setup (no verification method configured): ${email.toLowerCase()} ip=${clientIp(req)}`);
+        setSessionCookie(res, store.createSession(email.toLowerCase()));
+        return json(res, 200, { ok: true, signedIn: true, setupRequired: true, email: email.toLowerCase() });
+      }
+      store.authFail(ip);
+      return json(res, 200, { ok: true, setupRequired: true });
+    }
     // OAuth installs have no email path at all.
     if (isOauthMethod(auth.method)) {
       return json(res, 200, { ok: true, oauth: auth.method === 'oauth_google' ? 'google' : 'github' });

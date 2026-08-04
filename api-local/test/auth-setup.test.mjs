@@ -119,18 +119,33 @@ test('state 1 → 2: claiming the install leaves setup owed', async () => {
   assert.equal(state.adminEmail, ADMIN);
 });
 
-test('setup-incomplete blocks NEW sessions while the claim session keeps working', async () => {
+test('before setup, an admin can still sign in directly (and is told setup is owed)', async () => {
   const still = await ui('/api/admin/overview');
   assert.equal(still.status, 200, 'the claiming session still works');
 
+  // No verification method exists yet, so email-as-credential is the only posture
+  // available; locking this to one session would strand an admin who loses their
+  // cookie mid-setup, with shell access as the only way back in.
   const r = await fetch(BASE + '/api/auth/request-link', {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ email: ADMIN }),
   });
   const body = await r.json();
-  assert.equal(body.setupRequired, true);
-  assert.ok(!body.signedIn, 'no session may be minted by typing an email');
-  assert.ok(!(r.headers.get('set-cookie') || '').includes('mk_session='));
+  assert.equal(body.setupRequired, true, 'the console still owes setup');
+  assert.equal(body.signedIn, true, 'a known admin gets in');
+  const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+  assert.match(cookie, /^mk_session=/);
+  const me = await fetch(BASE + '/api/admin/overview', { headers: { cookie, 'x-mailkite-ui': '1' } });
+  assert.equal(me.status, 200, 'that session is usable');
+
+  // A stranger still gets nothing.
+  const s2 = await fetch(BASE + '/api/auth/request-link', {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email: 'nobody@elsewhere.example' }),
+  });
+  const b2 = await s2.json();
+  assert.ok(!b2.signedIn, 'non-admins are never signed in');
+  assert.ok(!(s2.headers.get('set-cookie') || '').includes('mk_session='));
 });
 
 test('email setup: a key the send API rejects is never stored', async () => {

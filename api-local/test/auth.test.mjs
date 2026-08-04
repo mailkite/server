@@ -228,7 +228,7 @@ test('unclaimed install: first email claims admin (WP-style), once; reset-admin 
 // Claimed but not set up: the claiming session keeps working, but NO new session can
 // be minted by typing an email. The old "no mail channel → direct sign-in" behaviour is
 // gone — that window is one session long now (docs/auth-setup.md).
-test('setup owed: request-link mints no session, and says setup is required', async () => {
+test('setup owed: an admin signs in directly; strangers get nothing', async () => {
   const P3 = PORT + 2;
   const B3 = `http://127.0.0.1:${P3}`;
   const dir3 = mkdtempSync(join(tmpdir(), 'mk-nochan-'));
@@ -245,16 +245,24 @@ test('setup owed: request-link mints no session, and says setup is required', as
     assert.equal(s.setupRequired, true, 'but a sign-in method is still owed');
     assert.equal(s.method, null);
 
-    for (const email of [ADMIN, 'stranger@nowhere.example']) {
-      const r = await fetch(B3 + '/api/auth/request-link', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ email }),
-      });
-      const body = await r.json();
-      assert.equal(body.ok, true);
-      assert.ok(!body.signedIn, `no direct sign-in for ${email}`);
-      assert.ok(!(r.headers.get('set-cookie') || '').includes('mk_session='), `no cookie for ${email}`);
-    }
+    // With no verification method configured there is nothing to verify against, so the
+    // admin still signs in directly (the console gates on finishing setup).
+    const ok = await fetch(B3 + '/api/auth/request-link', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN }),
+    });
+    const okBody = await ok.json();
+    assert.equal(okBody.signedIn, true, 'admin gets in before setup');
+    assert.equal(okBody.setupRequired, true, 'and is told setup is owed');
+    assert.match((ok.headers.get('set-cookie') || '').split(';')[0], /^mk_session=/);
+
+    const no = await fetch(B3 + '/api/auth/request-link', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'stranger@nowhere.example' }),
+    });
+    const noBody = await no.json();
+    assert.ok(!noBody.signedIn, 'no direct sign-in for a stranger');
+    assert.ok(!(no.headers.get('set-cookie') || '').includes('mk_session='), 'no cookie for a stranger');
   } finally {
     p3.kill();
     rmSync(dir3, { recursive: true, force: true });
