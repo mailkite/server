@@ -48,6 +48,10 @@ export class CloudProvider implements MailProvider {
   async deleteAppPassword(): Promise<void> {
     throw new NotImplemented("MailKite Cloud connection")
   }
+
+  async revealAppPassword(): Promise<string> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
   async createKey(): Promise<string> {
     throw new NotImplemented("MailKite Cloud connection")
   }

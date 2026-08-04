@@ -799,6 +799,20 @@ Object.assign(routes, {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     return json(res, 200, { appPasswords: store.appPasswords(store.defaultUser()) });
   },
+  // Showing a password again is an admin action on an already-admin-authenticated
+  // console; the secret is never in a listing, only here, one at a time.
+  'POST /api/admin/app-passwords/reveal': async (req, res, raw) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    const { id } = JSON.parse(raw.toString() || '{}');
+    const secret = store.revealAppPassword(Number(id));
+    if (!secret) {
+      return json(res, 404, {
+        error: 'This password can no longer be shown — it was created before secrets were stored, or HMAC_SECRET has changed since. It still works; revoke and create a new one to get a copyable value.',
+        code: 'not_revealable',
+      });
+    }
+    return json(res, 200, { secret });
+  },
   'POST /api/admin/app-passwords': async (req, res, raw) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const body = JSON.parse(raw.toString() || '{}');

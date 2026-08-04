@@ -4,7 +4,7 @@
 
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { KeyRound, Mail, Plus, Trash2 } from "lucide-react"
+import { Copy, Eye, EyeOff, KeyRound, Mail, Plus, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { ValueRow } from "@/components/code-block"
@@ -38,6 +38,31 @@ export function CredentialsScreen() {
   const provider = useProvider()
   const qc = useQueryClient()
   const confirm = useConfirm()
+  // Revealed secrets live only in this component's state — never in a query cache.
+  const [shown, setShown] = useState<Record<number, string>>({})
+
+  const toggleShow = async (p: AppPassword) => {
+    if (shown[p.id]) {
+      setShown((s) => { const { [p.id]: _drop, ...rest } = s; return rest })
+      return
+    }
+    try {
+      const secret = await provider.revealAppPassword(p.id)
+      setShown((s) => ({ ...s, [p.id]: secret }))
+    } catch (e) {
+      toast.error(errMsg(e))
+    }
+  }
+
+  const copyPw = async (p: AppPassword) => {
+    try {
+      const secret = shown[p.id] ?? (await provider.revealAppPassword(p.id))
+      await navigator.clipboard.writeText(secret)
+      toast.success("App password copied")
+    } catch (e) {
+      toast.error(errMsg(e))
+    }
+  }
 
   const creds = useQuery({ queryKey: ["credentials"], queryFn: () => provider.credentials() })
   const domains = useQuery({ queryKey: ["domains"], queryFn: () => provider.domains() })
@@ -178,16 +203,50 @@ export function CredentialsScreen() {
                       {p.protocols.map((x) => x.toUpperCase()).join(" + ") || "no access"}
                       {p.label ? ` · ${p.label}` : ""} · last used {when(p.last_used_at)}
                     </p>
+                    {/* The secret stays masked until asked for, so a shared screen or a
+                        screenshot of this list never leaks a working credential. */}
+                    {p.masked || shown[p.id] ? (
+                      <p className="mt-1 truncate font-mono text-xs text-muted-foreground">
+                        {shown[p.id] ?? p.masked}
+                      </p>
+                    ) : (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Created before secrets were stored — it still works, but can&rsquo;t be shown again.
+                      </p>
+                    )}
                   </div>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => revoke(p)}
-                    disabled={remove.isPending}
-                    aria-label={`Revoke the app password for ${scopeOf(p)}`}
-                  >
-                    <Trash2 className="size-4" /> Revoke
-                  </Button>
+                  <div className="flex items-center gap-1">
+                    {p.canReveal && (
+                      <>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => toggleShow(p)}
+                          aria-label={shown[p.id] ? `Hide the app password for ${scopeOf(p)}` : `Show the app password for ${scopeOf(p)}`}
+                        >
+                          {shown[p.id] ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
+                          {shown[p.id] ? "Hide" : "Show"}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => copyPw(p)}
+                          aria-label={`Copy the app password for ${scopeOf(p)}`}
+                        >
+                          <Copy className="size-4" /> Copy
+                        </Button>
+                      </>
+                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => revoke(p)}
+                      disabled={remove.isPending}
+                      aria-label={`Revoke the app password for ${scopeOf(p)}`}
+                    >
+                      <Trash2 className="size-4" /> Revoke
+                    </Button>
+                  </div>
                 </li>
               ))}
             </ul>

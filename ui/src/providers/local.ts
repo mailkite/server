@@ -94,6 +94,11 @@ export class LocalProvider implements MailProvider {
   async createAppPassword(spec: NewAppPassword): Promise<{ secret: string } & AppPassword> {
     return (await this.call("/api/admin/app-passwords", { method: "POST", body: JSON.stringify(spec) })).json()
   }
+  async revealAppPassword(id: number): Promise<string> {
+    const res = await this.call("/api/admin/app-passwords/reveal", { method: "POST", body: JSON.stringify({ id }) })
+    const body = (await res.json()) as { secret?: string }
+    return body.secret ?? ""
+  }
   async deleteAppPassword(id: number): Promise<void> {
     await this.call(`/api/admin/app-passwords/${id}`, { method: "DELETE" })
   }

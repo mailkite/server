@@ -47,6 +47,9 @@ export type AppPassword = {
   protocols: ("imap" | "api")[]
   created_at: number | null
   last_used_at: number | null
+  /** Masked hint for the list; null when the secret can no longer be shown. */
+  masked?: string | null
+  canReveal?: boolean
 }
 
 export type NewAppPassword = {
@@ -111,6 +114,8 @@ export interface MailProvider {
   /** App passwords — mailbox access for a mail client, an app, or an agent. */
   appPasswords(): Promise<AppPassword[]>
   createAppPassword(spec: NewAppPassword): Promise<{ secret: string } & AppPassword>
+  /** Show a stored secret again (admin-only, one at a time). */
+  revealAppPassword(id: number): Promise<string>
   deleteAppPassword(id: number): Promise<void>
   /** Inbound webhook config — one target per domain. */
   webhooks(): Promise<WebhookConfig[]>

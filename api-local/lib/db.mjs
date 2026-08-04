@@ -3,7 +3,7 @@
 // everything else is rows.
 
 import { DatabaseSync } from 'node:sqlite';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -97,6 +97,38 @@ const SCHEMA = `
   );
 `;
 
+// App passwords are kept so the console can show them again. Anyone who can read this
+// file can already read the mail these credentials unlock, so the risk that matters is a
+// copied database — encrypting under a key derived from HMAC_SECRET means the file alone
+// is not enough, the server's environment is needed too. Rotating HMAC_SECRET makes
+// existing secrets unshowable; they keep WORKING, since verification uses the scrypt hash.
+const encKey = () => {
+  const secret = process.env.HMAC_SECRET || '';
+  return secret ? scryptSync(secret, 'mailkite-app-password-enc', 32) : null;
+};
+
+function sealSecret(raw) {
+  const key = encKey();
+  if (!key) return null;
+  const iv = randomBytes(12);
+  const c = createCipheriv('aes-256-gcm', key, iv);
+  const body = Buffer.concat([c.update(raw, 'utf8'), c.final()]);
+  return `${iv.toString('base64url')}.${c.getAuthTag().toString('base64url')}.${body.toString('base64url')}`;
+}
+
+function openSecret(sealed) {
+  const key = encKey();
+  if (!key || !sealed) return null;
+  try {
+    const [iv, tag, body] = String(sealed).split('.');
+    const d = createDecipheriv('aes-256-gcm', key, Buffer.from(iv, 'base64url'));
+    d.setAuthTag(Buffer.from(tag, 'base64url'));
+    return Buffer.concat([d.update(Buffer.from(body, 'base64url')), d.final()]).toString('utf8');
+  } catch {
+    return null; // rotated key, or a tampered row
+  }
+}
+
 export class Store {
   constructor(dataDir) {
     mkdirSync(join(dataDir, 'blobs'), { recursive: true });
@@ -133,6 +165,8 @@ export class Store {
     for (const [name, ddl] of [
       ['domain', 'TEXT'], ['address', 'TEXT'], ['protocols', 'TEXT'],
       ['lookup', 'TEXT'], ['label', 'TEXT'], ['created_at', 'INTEGER'], ['last_used_at', 'INTEGER'],
+      // Sealed copy of the secret, so the console can show it again (see sealSecret).
+      ['secret_enc', 'TEXT'],
     ]) {
       if (!cols.includes(name)) this.db.exec(`ALTER TABLE app_passwords ADD COLUMN ${name} ${ddl}`);
     }
@@ -194,18 +228,33 @@ export class Store {
     const a = String(address).toLowerCase();
     const protoCsv = [...new Set(protocols)].filter((p) => p === 'imap' || p === 'api').join(',');
     const r = this.db.prepare(
-      `INSERT INTO app_passwords (username, hash, user_id, domain, address, protocols, lookup, label, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-      .run(`${a}@${d}`, hash, userId, d, a, protoCsv, this.hashToken(raw), label, Date.now());
+      `INSERT INTO app_passwords (username, hash, user_id, domain, address, protocols, lookup, label, created_at, secret_enc)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(`${a}@${d}`, hash, userId, d, a, protoCsv, this.hashToken(raw), label, Date.now(), sealSecret(raw));
     return { id: Number(r.lastInsertRowid), secret: raw };
   }
 
-  /** Listing never exposes secrets — only what a password covers and when it was used. */
+  /** Listing shows what a password covers and whether it can still be shown — never the secret. */
   appPasswords(userId = null) {
-    const sql = `SELECT rowid AS id, label, domain, address, protocols, created_at, last_used_at
+    const sql = `SELECT rowid AS id, label, domain, address, protocols, created_at, last_used_at, secret_enc
                    FROM app_passwords ${userId == null ? '' : 'WHERE user_id = ?'} ORDER BY rowid DESC`;
     const rows = userId == null ? this.db.prepare(sql).all() : this.db.prepare(sql).all(userId);
-    return rows.map((r) => ({ ...r, protocols: r.protocols ? r.protocols.split(',') : [] }));
+    return rows.map(({ secret_enc, ...r }) => {
+      // A hint, never the secret: enough to tell two passwords apart at a glance.
+      const secret = openSecret(secret_enc);
+      return {
+        ...r,
+        protocols: r.protocols ? r.protocols.split(',') : [],
+        masked: secret ? `${secret.slice(0, 11)}${'•'.repeat(12)}${secret.slice(-4)}` : null,
+        canReveal: !!secret,
+      };
+    });
+  }
+
+  /** rowid-addressed reveal, matching how the rest of this table is addressed. */
+  revealAppPassword(id) {
+    const r = this.db.prepare('SELECT secret_enc FROM app_passwords WHERE rowid = ?').get(id);
+    return r ? openSecret(r.secret_enc) : null;
   }
   deleteAppPassword(id) {
     return this.db.prepare('DELETE FROM app_passwords WHERE rowid = ?').run(id).changes > 0;
