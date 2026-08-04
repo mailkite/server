@@ -279,3 +279,47 @@ test('IMAP sessions are scoped to the matched address', async () => {
   const st = await (await edge('/api/imap/status', { userId: asScoped.userId, mailboxId: asScoped.mailboxId, mailbox: 'INBOX' })).json();
   assert.equal(st.total, scoped.messages.length, 'STATUS agrees with LIST');
 });
+
+test('update: label, address and access can change; the domain cannot', async () => {
+  const made = await newPw({ label: 'first', domain: DOMAIN, address: 'sales', protocols: ['imap'] });
+
+  const r = await admin(`/api/admin/app-passwords/${made.id}`, { label: 'renamed', address: 'sales-*', protocols: ['imap', 'api'] }, 'PATCH');
+  assert.equal(r.status, 200);
+  const updated = await r.json();
+  assert.equal(updated.label, 'renamed');
+  assert.equal(updated.address, 'sales-*');
+  assert.deepEqual(updated.protocols.sort(), ['api', 'imap']);
+
+  // The edit is real: the widened pattern now authenticates an address it didn't cover.
+  const auth = await imapAuth(`sales-eu@${DOMAIN}`, made.password);
+  assert.equal(auth.ok, true, 'the new pattern is in force');
+
+  const moved = await admin(`/api/admin/app-passwords/${made.id}`, { domain: 'elsewhere.example' }, 'PATCH');
+  assert.equal(moved.status, 400);
+  assert.equal((await moved.json()).code, 'domain_immutable');
+
+  const empty = await admin(`/api/admin/app-passwords/${made.id}`, { protocols: [] }, 'PATCH');
+  assert.equal(empty.status, 400, 'a password with no access is meaningless');
+
+  const missing = await admin('/api/admin/app-passwords/999999', { label: 'x' }, 'PATCH');
+  assert.equal(missing.status, 404);
+});
+
+test('rotate: the new secret works and the old one stops immediately', async () => {
+  const made = await newPw({ label: 'rotate me', domain: DOMAIN, address: 'ops', protocols: ['imap'] });
+  assert.equal((await imapAuth(`ops@${DOMAIN}`, made.password)).ok, true);
+
+  const r = await admin(`/api/admin/app-passwords/${made.id}/rotate`, {});
+  assert.equal(r.status, 200);
+  const { secret } = await r.json();
+  assert.notEqual(secret, made.password);
+
+  assert.equal((await imapAuth(`ops@${DOMAIN}`, secret)).ok, true, 'the new secret authenticates');
+  assert.ok(!(await imapAuth(`ops@${DOMAIN}`, made.password)).ok, 'the old secret is dead');
+
+  // Scope survives rotation — only the secret changed.
+  const after = await (await admin('/api/admin/app-passwords')).json();
+  const row = after.appPasswords.find((p) => p.id === made.id);
+  assert.equal(row.address, 'ops');
+  assert.equal(row.label, 'rotate me');
+});

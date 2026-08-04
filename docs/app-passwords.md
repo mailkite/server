@@ -69,6 +69,16 @@ whether you're routing mail or granting access to it.
 - App passwords are never full API keys: they cannot manage domains, mint credentials, or send
   outside their matched addresses.
 
+## Editing
+
+`PATCH .../app-passwords/:id` changes `label`, `address`, and `protocols`. The **domain is
+fixed at creation** — repointing a live credential at another domain silently changes what
+it can read, so that returns 400 and asks for a new password instead.
+
+`POST .../app-passwords/:id/rotate` issues a new secret and kills the old one immediately;
+scope and label survive. Setting a chosen secret is deliberately unsupported — picked
+credentials are predictably weak.
+
 ## Migration
 
 Existing address-scoped app passwords (`mk_imap_…`) gain

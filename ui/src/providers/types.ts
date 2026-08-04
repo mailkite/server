@@ -116,6 +116,10 @@ export interface MailProvider {
   createAppPassword(spec: NewAppPassword): Promise<{ secret: string } & AppPassword>
   /** Show a stored secret again (admin-only, one at a time). */
   revealAppPassword(id: number): Promise<string>
+  /** Edit what a password covers. The domain is fixed at creation. */
+  updateAppPassword(id: number, patch: Partial<Pick<NewAppPassword, "label" | "address" | "protocols">>): Promise<AppPassword>
+  /** New secret; the old one stops working immediately. */
+  rotateAppPassword(id: number): Promise<string>
   deleteAppPassword(id: number): Promise<void>
   /** Inbound webhook config — one target per domain. */
   webhooks(): Promise<WebhookConfig[]>

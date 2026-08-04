@@ -99,6 +99,18 @@ export class LocalProvider implements MailProvider {
     const body = (await res.json()) as { secret?: string }
     return body.secret ?? ""
   }
+  async updateAppPassword(
+    id: number,
+    patch: Partial<Pick<NewAppPassword, "label" | "address" | "protocols">>,
+  ): Promise<AppPassword> {
+    const res = await this.call(`/api/admin/app-passwords/${id}`, { method: "PATCH", body: JSON.stringify(patch) })
+    return (await res.json()) as AppPassword
+  }
+  async rotateAppPassword(id: number): Promise<string> {
+    const res = await this.call(`/api/admin/app-passwords/${id}/rotate`, { method: "POST", body: "{}" })
+    const body = (await res.json()) as { secret?: string }
+    return body.secret ?? ""
+  }
   async deleteAppPassword(id: number): Promise<void> {
     await this.call(`/api/admin/app-passwords/${id}`, { method: "DELETE" })
   }

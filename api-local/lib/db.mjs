@@ -256,6 +256,37 @@ export class Store {
     const r = this.db.prepare('SELECT secret_enc FROM app_passwords WHERE rowid = ?').get(id);
     return r ? openSecret(r.secret_enc) : null;
   }
+  /**
+   * Edit what an existing password covers. The DOMAIN is deliberately not editable:
+   * repointing a live credential at another domain silently changes what it can read,
+   * and a new password is the honest way to express that.
+   */
+  updateAppPassword(id, { label, address, protocols } = {}) {
+    const row = this.db.prepare('SELECT rowid AS id, domain, address FROM app_passwords WHERE rowid = ?').get(id);
+    if (!row) return null;
+    const nextAddress = address == null ? row.address : String(address).toLowerCase();
+    const sets = ['label = ?', 'address = ?', 'username = ?'];
+    const args = [label ?? null, nextAddress, `${nextAddress}@${row.domain}`];
+    if (protocols) {
+      sets.push('protocols = ?');
+      args.push([...new Set(protocols)].filter((x) => x === 'imap' || x === 'api').join(','));
+    }
+    this.db.prepare(`UPDATE app_passwords SET ${sets.join(', ')} WHERE rowid = ?`).run(...args, id);
+    return this.appPasswords().find((p) => p.id === Number(id)) ?? null;
+  }
+
+  /** New secret, old one dead immediately. Everything the password covers is unchanged. */
+  rotateAppPassword(id) {
+    const row = this.db.prepare('SELECT rowid AS id FROM app_passwords WHERE rowid = ?').get(id);
+    if (!row) return null;
+    const raw = 'mk_pw_' + randomBytes(24).toString('base64url');
+    const salt = randomBytes(16);
+    const hash = salt.toString('hex') + ':' + scryptSync(raw, salt, 32).toString('hex');
+    this.db.prepare('UPDATE app_passwords SET hash = ?, lookup = ?, secret_enc = ? WHERE rowid = ?')
+      .run(hash, this.hashToken(raw), sealSecret(raw), id);
+    return raw;
+  }
+
   deleteAppPassword(id) {
     return this.db.prepare('DELETE FROM app_passwords WHERE rowid = ?').run(id).changes > 0;
   }

@@ -1021,11 +1021,56 @@ const PARAM_ROUTES = [
   { rx: MAILBOX_UID_ROUTE, handler: handleMailboxUid },
   {
     rx: /^\/api\/admin\/app-passwords\/(\d+)$/,
-    handler: async (req, res, _raw, match) => {
-      if (req.method !== 'DELETE') return json(res, 405, { error: 'use DELETE', code: 'bad_method' });
+    handler: async (req, res, raw, match) => {
       if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
-      return store.deleteAppPassword(Number(match[1]))
-        ? json(res, 200, { ok: true })
+      const id = Number(match[1]);
+      if (req.method === 'DELETE') {
+        return store.deleteAppPassword(id)
+          ? json(res, 200, { ok: true })
+          : json(res, 404, { error: 'no such app password', code: 'not_found' });
+      }
+      if (req.method !== 'PATCH') return json(res, 405, { error: 'use PATCH or DELETE', code: 'bad_method' });
+      const body = JSON.parse(raw.toString() || '{}');
+      const existing = store.appPasswords().find((p) => p.id === id);
+      if (!existing) return json(res, 404, { error: 'no such app password', code: 'not_found' });
+      // Changing the domain would repoint a live credential at other people's mail;
+      // a new password says that out loud instead.
+      if (body.domain && String(body.domain).toLowerCase() !== existing.domain) {
+        return json(res, 400, {
+          error: `An app password stays on the domain it was created for (${existing.domain}). Create a new one for ${String(body.domain).toLowerCase()}.`,
+          code: 'domain_immutable',
+        });
+      }
+      let address;
+      if (body.address !== undefined) {
+        address = normalizePattern(body.address, existing.domain);
+        if (!address) return json(res, 400, { error: `invalid address pattern: ${body.address}`, code: 'bad_address' });
+      }
+      let protocols;
+      if (body.protocols !== undefined) {
+        protocols = [...new Set(body.protocols || [])].filter((p) => p === 'imap' || p === 'api');
+        if (!protocols.length) {
+          return json(res, 400, { error: 'pick at least one kind of access (imap, api)', code: 'bad_protocols' });
+        }
+      }
+      const updated = store.updateAppPassword(id, {
+        label: body.label !== undefined ? (body.label || null) : existing.label,
+        address, protocols,
+      });
+      return updated
+        ? json(res, 200, updated)
+        : json(res, 404, { error: 'no such app password', code: 'not_found' });
+    },
+  },
+  {
+    rx: /^\/api\/admin\/app-passwords\/(\d+)\/rotate$/,
+    handler: async (req, res, _raw, match) => {
+      if (req.method !== 'POST') return json(res, 405, { error: 'use POST', code: 'bad_method' });
+      if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+      const secret = store.rotateAppPassword(Number(match[1]));
+      // The old secret stops working the moment this returns, so say so plainly.
+      return secret
+        ? json(res, 200, { secret, password: secret })
         : json(res, 404, { error: 'no such app password', code: 'not_found' });
     },
   },

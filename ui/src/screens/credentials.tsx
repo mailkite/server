@@ -4,7 +4,7 @@
 
 import { useEffect, useState, type FormEvent } from "react"
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { Copy, Eye, EyeOff, KeyRound, Mail, Plus, Trash2 } from "lucide-react"
+import { Copy, Eye, EyeOff, KeyRound, Mail, Pencil, Plus, RefreshCw, Trash2 } from "lucide-react"
 import { toast } from "sonner"
 import { PageHeader } from "@/components/page-header"
 import { ValueRow } from "@/components/code-block"
@@ -40,6 +40,48 @@ export function CredentialsScreen() {
   const confirm = useConfirm()
   // Revealed secrets live only in this component's state — never in a query cache.
   const [shown, setShown] = useState<Record<number, string>>({})
+  const [editing, setEditing] = useState<number | null>(null)
+  const [draft, setDraft] = useState<{ address: string; label: string; protocols: ("imap" | "api")[] }>({
+    address: "", label: "", protocols: ["api"],
+  })
+
+  const startEdit = (p: AppPassword) => {
+    setEditing(p.id)
+    setDraft({ address: p.address, label: p.label ?? "", protocols: [...p.protocols] as ("imap" | "api")[] })
+  }
+
+  const saveEdit = useMutation({
+    mutationFn: (id: number) =>
+      provider.updateAppPassword(id, {
+        address: draft.address.trim() || "*",
+        label: draft.label.trim() || null,
+        protocols: draft.protocols,
+      }),
+    onSuccess: () => {
+      setEditing(null)
+      qc.invalidateQueries({ queryKey: ["app-passwords"] })
+      toast.success("App password updated")
+    },
+    onError: (e) => toast.error(errMsg(e)),
+  })
+
+  const rotate = async (p: AppPassword) => {
+    const ok = await confirm({
+      title: `Rotate the app password for ${scopeOf(p)}?`,
+      description: "A new secret replaces it immediately — anything still using the old one stops working until you update it.",
+      confirmText: "Rotate",
+      destructive: true,
+    })
+    if (!ok) return
+    try {
+      const secret = await provider.rotateAppPassword(p.id)
+      setShown((prev) => ({ ...prev, [p.id]: secret }))
+      qc.invalidateQueries({ queryKey: ["app-passwords"] })
+      toast.success("Rotated — the new secret is shown below, copy it now")
+    } catch (e) {
+      toast.error(errMsg(e))
+    }
+  }
 
   const toggleShow = async (p: AppPassword) => {
     if (shown[p.id]) {
@@ -216,6 +258,12 @@ export function CredentialsScreen() {
                     )}
                   </div>
                   <div className="flex items-center gap-1">
+                    <Button variant="ghost" size="sm" onClick={() => startEdit(p)} aria-label={`Edit the app password for ${scopeOf(p)}`}>
+                      <Pencil className="size-4" /> Edit
+                    </Button>
+                    <Button variant="ghost" size="sm" onClick={() => rotate(p)} aria-label={`Rotate the app password for ${scopeOf(p)}`}>
+                      <RefreshCw className="size-4" /> Rotate
+                    </Button>
                     {p.canReveal && (
                       <>
                         <Button
@@ -247,6 +295,104 @@ export function CredentialsScreen() {
                       <Trash2 className="size-4" /> Revoke
                     </Button>
                   </div>
+                  {editing === p.id && (
+                    <div className="mt-2 w-full space-y-2 rounded-md border border-border bg-accent/20 p-3">
+                      <div className="flex items-center gap-1.5">
+                        <Input
+                          aria-label="Address"
+                          className="flex-1 font-mono text-sm"
+                          placeholder="*"
+                          value={draft.address}
+                          onChange={(e) => setDraft({ ...draft, address: e.target.value })}
+                          spellCheck={false}
+                        />
+                        <span aria-hidden className="font-mono text-sm text-muted-foreground">@{p.domain}</span>
+                      </div>
+                      <Input
+                        aria-label="Label"
+                        placeholder="Label (optional)"
+                        value={draft.label}
+                        onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+                      />
+                      <div className="flex items-center gap-4">
+                        {(["imap", "api"] as const).map((k) => (
+                          <label key={k} className="flex items-center gap-1.5 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={draft.protocols.includes(k)}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  protocols: e.target.checked
+                                    ? [...draft.protocols, k]
+                                    : draft.protocols.filter((x) => x !== k),
+                                })
+                              }
+                            />
+                            {k.toUpperCase()}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        The domain stays <code className="font-mono">{p.domain}</code> — create a new password to cover a different one.
+                      </p>
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => saveEdit.mutate(p.id)} disabled={saveEdit.isPending || !draft.protocols.length}>
+                          {saveEdit.isPending ? "Saving…" : "Save changes"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+                      </div>
+                    </div>
+                  )}
+                  {editing === p.id && (
+                    <div className="mt-2 w-full space-y-2 rounded-md border border-border bg-accent/20 p-3">
+                      <div className="flex items-center gap-1.5">
+                        <Input
+                          aria-label="Address"
+                          className="flex-1 font-mono text-sm"
+                          placeholder="*"
+                          value={draft.address}
+                          onChange={(e) => setDraft({ ...draft, address: e.target.value })}
+                          spellCheck={false}
+                        />
+                        <span aria-hidden className="font-mono text-sm text-muted-foreground">@{p.domain}</span>
+                      </div>
+                      <Input
+                        aria-label="Label"
+                        placeholder="Label (optional)"
+                        value={draft.label}
+                        onChange={(e) => setDraft({ ...draft, label: e.target.value })}
+                      />
+                      <div className="flex items-center gap-4">
+                        {(["imap", "api"] as const).map((k) => (
+                          <label key={k} className="flex items-center gap-1.5 text-xs">
+                            <input
+                              type="checkbox"
+                              checked={draft.protocols.includes(k)}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  protocols: e.target.checked
+                                    ? [...draft.protocols, k]
+                                    : draft.protocols.filter((x) => x !== k),
+                                })
+                              }
+                            />
+                            {k.toUpperCase()}
+                          </label>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        The domain stays <code className="font-mono">{p.domain}</code> — create a new password to cover a different one.
+                      </p>
+                      <div className="flex gap-2">
+                        <Button size="sm" onClick={() => saveEdit.mutate(p.id)} disabled={saveEdit.isPending || !draft.protocols.length}>
+                          {saveEdit.isPending ? "Saving…" : "Save changes"}
+                        </Button>
+                        <Button size="sm" variant="ghost" onClick={() => setEditing(null)}>Cancel</Button>
+                      </div>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
