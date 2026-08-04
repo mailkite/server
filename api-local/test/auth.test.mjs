@@ -1,10 +1,12 @@
 // Console auth: magic-link request/verify, cookie sessions + CSRF header,
 // WP-style first-run admin claim + reset-admin recovery, HMAC-bearer coexistence. Uses the log-delivery
-// fallback (no MAILKITE_SEND_KEY), reading links from the server's stdout.
+// delivery through a stub send endpoint (links are read from what the stub received),
+// plus the broken-channel and no-channel sign-in modes.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,7 +18,9 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN = 'gabe@admin.example';
 const dir = new URL('..', import.meta.url).pathname;
 
-let proc, dataDir, stdout = '';
+let proc, dataDir, stdout = '', sendStub;
+const SEND_PORT = PORT + 5;
+const sentLinks = [];
 
 const ui = (path, body, extra = {}) => fetch(BASE + path, {
   method: body === undefined ? 'GET' : 'POST',
@@ -32,16 +36,42 @@ const waitLog = async (re, timeoutMs = 5000) => {
     await new Promise((r) => setTimeout(r, 50));
   }
   throw new Error(`log line ${re} not found in:\n${stdout}`);
+}
+
+/** Wait for the stub send endpoint to receive a mail, and return the link inside it. */
+async function waitLink() {
+  for (let i = 0; i < 100; i++) {
+    const last = sentLinks[sentLinks.length - 1];
+    const m = last && String(last.text || '').match(/(https?:\/\/\S*\/login#token=\S+)/);
+    if (m) return m[1];
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error(`no link delivered to the stub; received: ${JSON.stringify(sentLinks)}`);
 };
 
 before(async () => {
   dataDir = mkdtempSync(join(tmpdir(), 'mk-auth-'));
+  // Minimal stand-in for the cloud send API: records what would have been emailed and
+  // answers 200, so link delivery genuinely succeeds in tests.
+  sendStub = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      try { sentLinks.push(JSON.parse(body)); } catch { /* ignore */ }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, id: 'msg_stub' }));
+    });
+  });
+  await new Promise((r) => sendStub.listen(SEND_PORT, '127.0.0.1', r));
   proc = spawn('node', [join(dir, 'server.mjs')], {
     env: { ...process.env, DATA_DIR: dataDir, HMAC_SECRET: SECRET, PORT: String(PORT), ADMIN_EMAIL: ADMIN,
       // A configured mail channel keeps this instance on the magic-link path (links
       // still log, since MAILKITE_SEND_KEY is unset). The no-channel direct sign-in
       // mode gets its own instance below.
-      SMARTHOST: 'smtp://u:p@127.0.0.1:2525' },
+      // A working send channel: the stub accepts the link, so this instance stays on
+      // the magic-link path. Broken-channel and no-channel modes get their own
+      // instances below.
+      MAILKITE_SEND_KEY: 'mk_live_stub', MAILKITE_SEND_URL: `http://127.0.0.1:${SEND_PORT}/v1/send` },
     stdio: ['ignore', 'pipe', 'inherit'],
   });
   proc.stdout.on('data', (d) => { stdout += d.toString(); });
@@ -50,14 +80,15 @@ before(async () => {
     catch { await new Promise((r) => setTimeout(r, 100)); }
   }
 });
-after(() => { proc?.kill(); rmSync(dataDir, { recursive: true, force: true }); });
+after(() => {
+  sendStub?.close(); proc?.kill(); rmSync(dataDir, { recursive: true, force: true }); });
 
 test('request-link: unknown email still {ok:true} and issues nothing', async () => {
   const res = await ui('/api/auth/request-link', { email: 'stranger@nowhere.example' });
   assert.equal(res.status, 200);
   assert.deepEqual(await res.json(), { ok: true });
   await new Promise((r) => setTimeout(r, 150));
-  assert.ok(!stdout.includes('magic-link:'), 'no link may be issued for a non-admin email');
+  assert.equal(sentLinks.length, 0, 'no link may be issued for a non-admin email');
 });
 
 let cookie = '';
@@ -65,7 +96,7 @@ let cookie = '';
 test('magic link: request → log fallback → verify → session cookie', async () => {
   const res = await ui('/api/auth/request-link', { email: ADMIN.toUpperCase() }); // case-insensitive
   assert.deepEqual(await res.json(), { ok: true });
-  const [, url] = await waitLog(/magic-link: (\S+)/);
+  const url = await waitLink();
   assert.ok(url.startsWith('http://127.0.0.1:' + PORT + '/login#token='), url);
   const token = url.split('#token=')[1];
 
@@ -105,8 +136,10 @@ test('HMAC bearer still works on admin routes (script path unchanged)', async ()
 test('invite: admin adds a second console user who can then sign in', async () => {
   const invite = await ui('/api/admin/users', { email: 'ops@admin.example' }, { cookie });
   assert.equal(invite.status, 200);
+  const before = sentLinks.length;
   await ui('/api/auth/request-link', { email: 'ops@admin.example' });
-  await waitLog(/magic-link: \S+/); // a second link got issued
+  for (let i = 0; i < 100 && sentLinks.length === before; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.ok(sentLinks.length > before, 'a second link got issued');
 });
 
 test('logout clears the session', async () => {
@@ -267,5 +300,35 @@ test('rate limiting counts failures only and resets for known admins', async () 
   } finally {
     p4.kill();
     rmSync(dir4, { recursive: true, force: true });
+  }
+});
+
+// A configured-but-broken send channel (wrong key, expired key, provider down) must not
+// lock the admin out — "the env var is set" is not proof that mail works.
+test('broken mail channel falls back to direct sign-in', async () => {
+  const P5 = PORT + 4;
+  const B5 = `http://127.0.0.1:${P5}`;
+  const dir5 = mkdtempSync(join(tmpdir(), 'mk-badkey-'));
+  const p5 = spawn('node', [join(dir, 'server.mjs')], {
+    // A key that will 401 at the cloud: the channel looks configured but cannot deliver.
+    env: { ...process.env, DATA_DIR: dir5, HMAC_SECRET: SECRET, PORT: String(P5), ADMIN_EMAIL: ADMIN, MAILKITE_SEND_KEY: 'mk_live_definitely_not_valid' },
+    stdio: 'ignore',
+  });
+  try {
+    for (let i = 0; i < 60; i++) {
+      try { await fetch(B5 + '/api/auth/status'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
+    }
+    assert.equal((await (await fetch(B5 + '/api/auth/status')).json()).mailChannel, true, 'channel reports configured');
+    const r = await fetch(B5 + '/api/auth/request-link', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: ADMIN }),
+    });
+    const body = await r.json();
+    assert.equal(body.signedIn, true, 'undeliverable link → admin signed in directly');
+    const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
+    const me = await fetch(B5 + '/api/admin/overview', { headers: { cookie, 'x-mailkite-ui': '1' } });
+    assert.equal(me.status, 200, 'the fallback session is usable');
+  } finally {
+    p5.kill();
+    rmSync(dir5, { recursive: true, force: true });
   }
 });

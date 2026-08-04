@@ -51,10 +51,15 @@ const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^
 // access is the root credential).
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const SEND_KEY = process.env.MAILKITE_SEND_KEY || '';
-// Can this server deliver mail at all? Drives sign-in mode (magic link vs direct admin
-// sign-in) — see the request-link handler.
-const MAIL_CHANNEL = !!(SEND_KEY || SMARTHOST);
+// Can this server email a sign-in link? Only the send API can do that — SMARTHOST
+// relays users' outbound mail and has no link path — so it alone decides whether
+// sign-in uses a magic link or direct admin sign-in. Delivery is still verified at
+// send time: see the request-link handler.
+const MAIL_CHANNEL = !!SEND_KEY;
 const MAGIC_FROM = process.env.MAGIC_LINK_FROM || '';
+// Configurable so tests can exercise the real link flow against a stub, and so a
+// self-hoster can point at their own compatible send endpoint.
+const SEND_URL = process.env.MAILKITE_SEND_URL || 'https://api.mailkite.dev/v1/send';
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 if (ADMIN_EMAIL) store.addAdminUser(ADMIN_EMAIL);
 const needsSetup = () => !ADMIN_EMAIL && store.adminUserCount() === 0;
@@ -74,14 +79,15 @@ const clientIp = (req) => String(req.socket.remoteAddress || '').replace(/^::fff
 const setSessionCookie = (res, raw, maxAge = 30 * 24 * 60 * 60) =>
   res.setHeader('set-cookie', `mk_session=${raw}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${scheme === 'https' ? '; Secure' : ''}`);
 
+/** @returns {Promise<boolean>} true only if the link was actually handed to a mail path. */
 async function deliverLink(email, url) {
   if (!SEND_KEY) {
     console.log(`magic-link: ${url}`); // greppable fallback: journalctl … | grep magic-link
-    return;
+    return false;
   }
   const from = MAGIC_FROM || `no-reply@${store.domains()[0] || 'localhost'}`;
   try {
-    const r = await fetch('https://api.mailkite.dev/v1/send', {
+    const r = await fetch(SEND_URL, {
       method: 'POST',
       headers: { authorization: `Bearer ${SEND_KEY}`, 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -90,9 +96,14 @@ async function deliverLink(email, url) {
         text: `Click to sign in to your MailKite Server console:\n\n${url}\n\nThe link works once and expires in 15 minutes. If you didn't request it, ignore this email.`,
       }),
     });
-    if (!r.ok) console.error(`magic-link: send failed (${r.status}) — falling back to log\nmagic-link: ${url}`);
+    if (!r.ok) {
+      console.error(`magic-link: send failed (${r.status}) — falling back to log\nmagic-link: ${url}`);
+      return false;
+    }
+    return true;
   } catch (e) {
     console.error(`magic-link: send error (${e.message}) — falling back to log\nmagic-link: ${url}`);
+    return false;
   }
 }
 
@@ -342,7 +353,16 @@ Object.assign(routes, {
         return json(res, 200, { ok: true, signedIn: true, email: email.toLowerCase() });
       }
       const token = store.createLoginToken(email);
-      await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
+      const delivered = await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
+      // A send channel that is configured but broken (wrong key, expired key, provider
+      // down) must not lock the admin out — presence of an env var is not proof that
+      // mail works. When delivery fails we fall back to the same posture as a server
+      // with no channel at all: a known admin signs in directly, loudly logged.
+      if (!delivered) {
+        console.warn(`auto-login (mail channel configured but delivery failed): ${email.toLowerCase()} ip=${clientIp(req)}`);
+        setSessionCookie(res, store.createSession(email.toLowerCase()));
+        return json(res, 200, { ok: true, signedIn: true, email: email.toLowerCase() });
+      }
       return json(res, 200, { ok: true });
     }
     store.authFail(ip); // unknown email — this is what the limiter is for

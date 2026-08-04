@@ -55,6 +55,9 @@ whether you're routing mail or granting access to it.
   the matched address as `mailboxId`, and the edge echoes it on every read, so a
   `hello`-scoped password sees the same mail over IMAP as over the REST routes. A `*`
   password stays account-wide.
+- Sign-in mode is decided by whether a link can *actually* be delivered, not by an env
+  var being set: `MAILKITE_SEND_KEY` enables the magic link, and if a send fails
+  (bad key, provider down) a known admin is signed in directly rather than stranded.
 - App passwords are **user-trust** credentials (like API keys), never edge-trust. The IMAP edge
   keeps calling `POST /api/imap/auth` (HMAC) — the backend now resolves the username
   against app passwords and answers with the matched account/mailbox.
