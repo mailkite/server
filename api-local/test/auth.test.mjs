@@ -303,9 +303,10 @@ test('rate limiting counts failures only and resets for known admins', async () 
   }
 });
 
-// A configured-but-broken send channel (wrong key, expired key, provider down) must not
-// lock the admin out — "the env var is set" is not proof that mail works.
-test('broken mail channel falls back to direct sign-in', async () => {
+// A configured-but-broken send channel must FAIL CLOSED. Handing out a session when
+// delivery fails would let anyone who knows the admin address sign in during any
+// outage — an availability failure must never become an authentication bypass.
+test('broken mail channel refuses a session (fails closed)', async () => {
   const P5 = PORT + 4;
   const B5 = `http://127.0.0.1:${P5}`;
   const dir5 = mkdtempSync(join(tmpdir(), 'mk-badkey-'));
@@ -323,10 +324,12 @@ test('broken mail channel falls back to direct sign-in', async () => {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: ADMIN }),
     });
     const body = await r.json();
-    assert.equal(body.signedIn, true, 'undeliverable link → admin signed in directly');
-    const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
-    const me = await fetch(B5 + '/api/admin/overview', { headers: { cookie, 'x-mailkite-ui': '1' } });
-    assert.equal(me.status, 200, 'the fallback session is usable');
+    assert.equal(body.ok, true);
+    assert.ok(!body.signedIn, 'a failed send must not sign anyone in');
+    assert.ok(
+      !(r.headers.get('set-cookie') || '').includes('mk_session='),
+      'no session cookie is issued when the link could not be delivered',
+    );
   } finally {
     p5.kill();
     rmSync(dir5, { recursive: true, force: true });

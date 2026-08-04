@@ -354,14 +354,12 @@ Object.assign(routes, {
       }
       const token = store.createLoginToken(email);
       const delivered = await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
-      // A send channel that is configured but broken (wrong key, expired key, provider
-      // down) must not lock the admin out — presence of an env var is not proof that
-      // mail works. When delivery fails we fall back to the same posture as a server
-      // with no channel at all: a known admin signs in directly, loudly logged.
+      // FAIL CLOSED. A configured channel means sign-in is verified by email, so a
+      // delivery failure must NOT hand out a session: otherwise any outage — or one an
+      // attacker waits for — downgrades authentication to "knows the admin address".
+      // The link is logged instead, so the operator can still recover from the box.
       if (!delivered) {
-        console.warn(`auto-login (mail channel configured but delivery failed): ${email.toLowerCase()} ip=${clientIp(req)}`);
-        setSessionCookie(res, store.createSession(email.toLowerCase()));
-        return json(res, 200, { ok: true, signedIn: true, email: email.toLowerCase() });
+        console.error(`magic-link: NOT delivered for ${email.toLowerCase()} — session refused; use the logged link above, or unset MAILKITE_SEND_KEY to allow direct admin sign-in`);
       }
       return json(res, 200, { ok: true });
     }
