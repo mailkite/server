@@ -44,6 +44,11 @@ before(async () => {
 
   // Stub send API: can be told to reject, which is how "the key is wrong" is simulated.
   sendStub = createServer((req, res) => {
+    // /v1/me is how the server asks "what may this key send from?"
+    if (new URL(req.url, 'http://x').pathname.endsWith('/me')) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ email: ADMIN, emailVerified: true, plan: 'free', sendingDomains: ['verified.example'] }));
+    }
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
@@ -339,4 +344,14 @@ test('setup works for the HMAC bearer, not just a cookie session', async () => {
 
   const anon = await fetch(BASE + '/api/auth/setup-state');
   assert.equal(anon.status, 401, 'no credential is still refused');
+});
+
+// An empty From must resolve to something the cloud will actually accept — the server
+// cannot know that locally, so it asks the account and only prompts if there's no answer.
+test('cloud setup with no From adopts a domain the account can send from', async () => {
+  sendBehaviour = 'ok';
+  const r = await ui('/api/auth/setup/email', { mode: 'cloud', key: 'mk_live_ok' }); // no from
+  assert.equal(r.status, 200, await r.text());
+  const lastSend = sentMail[sentMail.length - 1];
+  assert.match(lastSend.from, /@verified\.example$/, `adopted the account's domain, got ${lastSend.from}`);
 });

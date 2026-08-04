@@ -47,9 +47,9 @@ export function CredentialsScreen() {
   const [newSecret, setNewSecret] = useState<{ scope: string; secret: string } | null>(null)
 
   const [domain, setDomain] = useState("")
-  const [address, setAddress] = useState("*")
+  const [address, setAddress] = useState("")
   const [label, setLabel] = useState("")
-  const [access, setAccess] = useState<("imap" | "api")[]>(["imap"])
+  const [access, setAccess] = useState<("imap" | "api")[]>(["api"])
 
   // Default the dropdown to the first hosted domain once they load.
   useEffect(() => {
@@ -194,11 +194,22 @@ export function CredentialsScreen() {
           )}
 
           <form onSubmit={submitPw} className="grid gap-3 rounded-md border border-border bg-accent/20 p-3">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <label htmlFor="pw-domain" className="text-xs font-medium text-muted-foreground">Domain</label>
+            {/* Reads as the address it grants: local-part, @, domain. */}
+            <div className="space-y-1.5">
+              <label htmlFor="pw-address" className="text-xs font-medium text-muted-foreground">Mailbox</label>
+              <div className="flex items-center gap-1.5">
+                <Input
+                  id="pw-address"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  spellCheck={false}
+                  className="flex-1 font-mono text-sm"
+                  placeholder="*"
+                  aria-describedby="pw-address-hint"
+                />
+                <span aria-hidden className="font-mono text-sm text-muted-foreground">@</span>
                 <Select value={domain} onValueChange={setDomain} disabled={!domains.data?.length}>
-                  <SelectTrigger id="pw-domain" className="font-mono text-sm">
+                  <SelectTrigger aria-label="Domain" className="w-[46%] font-mono text-sm">
                     <SelectValue placeholder={domains.data?.length ? "Pick a domain" : "Add a domain first"} />
                   </SelectTrigger>
                   <SelectContent>
@@ -208,21 +219,10 @@ export function CredentialsScreen() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="space-y-1.5">
-                <label htmlFor="pw-address" className="text-xs font-medium text-muted-foreground">Address</label>
-                <Input
-                  id="pw-address"
-                  value={address}
-                  onChange={(e) => setAddress(e.target.value)}
-                  spellCheck={false}
-                  className="font-mono text-sm"
-                  placeholder="*"
-                />
-              </div>
             </div>
-            <p className="text-xs text-muted-foreground">
-              <code className="font-mono">*</code> covers every address on the domain;{" "}
-              <code className="font-mono">hello</code> just that one;{" "}
+            <p id="pw-address-hint" className="text-xs text-muted-foreground">
+              Leave blank for <code className="font-mono">*</code> — every address on the domain;{" "}
+              <code className="font-mono">hello</code> just that one;{" "} on the domain;{" "}
               <code className="font-mono">support-*</code> and <code className="font-mono">*-agent</code> match a family.
             </p>
 

@@ -18,7 +18,7 @@ import { headers, firstAddress, subject } from './lib/rfc822.mjs';
 import { parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
 import {
   authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
-  newCode, newState, publicSettings, sendSetupCode, smtpCfg,
+  cloudSendingDomains, newCode, newState, publicSettings, sendSetupCode, smtpCfg,
 } from './lib/auth-setup.mjs';
 import { matchesAddress, normalizePattern, splitAddress } from './lib/patterns.mjs';
 import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
@@ -511,10 +511,17 @@ Object.assign(routes, {
     if (mode === 'cloud') {
       const key = String(body.key || '').trim();
       if (!key) return json(res, 400, { error: 'Enter a MailKite Cloud API key.', code: 'bad_key' });
-      const from = String(body.from || '').trim();
-      // Defaulting this to a locally-hosted domain produced a baffling upstream 404:
-      // the cloud can only send from domains verified on ITS account, which this server
-      // cannot know. Ask rather than guess.
+      let from = String(body.from || '').trim();
+      // Left blank: ask the cloud what this key may send from rather than guessing a
+      // locally-hosted domain (which the cloud account probably hasn't verified — the
+      // baffling domain_not_owned 404). Only if it has nothing to offer do we ask.
+      if (!from) {
+        const domains = await cloudSendingDomains(key, SEND_URL);
+        if (domains.length) {
+          from = `no-reply@${domains[0]}`;
+          console.log(`sign-in setup: defaulting From to ${from} (verified on the cloud account)`);
+        }
+      }
       if (!EMAIL_RE.test(from)) {
         return json(res, 400, {
           error: 'Enter the From address sign-in emails should come from — it must be on a domain verified in your MailKite Cloud account.',

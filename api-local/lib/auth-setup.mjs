@@ -130,6 +130,25 @@ const codeBody = (code) =>
  * Send the verification code through the CANDIDATE config. Any failure propagates:
  * the caller must not persist a config whose send didn't work.
  */
+/**
+ * Ask the cloud which domains this key may send from. The server cannot know that on its
+ * own — a domain it hosts locally is unrelated to what the cloud account has verified —
+ * and guessing produces a domain_not_owned rejection at send time.
+ * @returns {Promise<string[]>} verified sending domains, or [] if the question can't be answered.
+ */
+export async function cloudSendingDomains(key, sendUrl) {
+  try {
+    const meUrl = new URL(sendUrl);
+    meUrl.pathname = meUrl.pathname.replace(/\/send$/, '/me');
+    const r = await fetch(meUrl, { headers: { authorization: `Bearer ${key}` } });
+    if (!r.ok) return [];
+    const body = await r.json().catch(() => ({}));
+    return Array.isArray(body.sendingDomains) ? body.sendingDomains : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function sendSetupCode({ method, settings, to, code, sendUrl }) {
   if (method === 'email_cloud') {
     let res;
