@@ -307,3 +307,26 @@ test('env pre-configuration skips the wizard entirely', async () => {
     rmSync(d, { recursive: true, force: true });
   }
 });
+
+// The console's "Advanced: connect with the admin secret" path authenticates with the
+// HMAC bearer, not a cookie. Setup used to reject it with "not signed in", stranding an
+// admin who connected that way with no path forward.
+test('setup works for the HMAC bearer, not just a cookie session', async () => {
+  const state = await fetch(BASE + '/api/auth/setup-state', {
+    headers: { authorization: 'Bearer ' + SECRET },
+  });
+  assert.equal(state.status, 200, 'bearer can read setup state');
+
+  sendBehaviour = 'reject';
+  const r = await fetch(BASE + '/api/auth/setup/email', {
+    method: 'POST',
+    headers: { authorization: 'Bearer ' + SECRET, 'content-type': 'application/json' },
+    body: JSON.stringify({ mode: 'cloud', key: 'mk_live_wrong', from: 'no-reply@setup.example' }),
+  });
+  // Reaches the send attempt (and fails there) rather than 401ing on auth.
+  assert.equal(r.status, 400);
+  assert.equal((await r.json()).code, 'send_failed');
+
+  const anon = await fetch(BASE + '/api/auth/setup-state');
+  assert.equal(anon.status, 401, 'no credential is still refused');
+});

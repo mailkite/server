@@ -380,6 +380,17 @@ const routes = {
 };
 
 // ---- console auth endpoints ------------------------------------------------------
+// Who is performing setup: a signed-in admin, or the HMAC bearer — the box-level
+// credential the console's "Advanced: connect with the admin secret" path and any script
+// use. Rejecting the bearer here meant an admin connected that way was told "not signed
+// in" with no way forward. Returns the address setup mail should go to.
+const setupActor = (req) => {
+  const session = uiSession(req);
+  if (session) return session;
+  if (!edgeAuthed(req)) return null;
+  return ADMIN_EMAIL || store.adminUsers()[0] || null;
+};
+
 Object.assign(routes, {
   // Always {ok:true} for unknown emails — no account enumeration. Rate limiting counts
   // *failed* attempts only (10 / 15 min) and resets on success: an admin signing in
@@ -472,7 +483,7 @@ Object.assign(routes, {
   // sign-ins are verified.
 
   'GET /api/auth/setup-state': async (req, res) => {
-    const email = uiSession(req);
+    const email = setupActor(req);
     if (!email) return json(res, 401, { error: 'not signed in' });
     const auth = effectiveAuth();
     const cfg = store.authConfig();
@@ -491,7 +502,7 @@ Object.assign(routes, {
   // Prove an email path: send a real code through the CANDIDATE config. Nothing is
   // persisted as authoritative here — a key that 401s fails loudly instead.
   'POST /api/auth/setup/email': async (req, res, raw) => {
-    const email = uiSession(req);
+    const email = setupActor(req);
     if (!email) return json(res, 401, { error: 'not signed in' });
     if (envAuthMethod()) return json(res, 409, { error: 'Sign-in is configured by environment variables on this server.', code: 'env_managed' });
     const body = JSON.parse(raw.toString() || '{}');
@@ -527,7 +538,7 @@ Object.assign(routes, {
 
   // The code came back → the path demonstrably works → promote it.
   'POST /api/auth/setup/email/verify': async (req, res, raw) => {
-    const email = uiSession(req);
+    const email = setupActor(req);
     if (!email) return json(res, 401, { error: 'not signed in' });
     const pending = store.pendingSetup('email');
     if (!pending) return json(res, 400, { error: 'That code expired — send a new one.', code: 'no_pending' });
@@ -548,7 +559,7 @@ Object.assign(routes, {
   // Stage an OAuth candidate and hand back the authorize URL. Completing the round
   // trip is the proof; nothing is authoritative until the callback succeeds.
   'POST /api/auth/setup/oauth': async (req, res, raw) => {
-    const email = uiSession(req);
+    const email = setupActor(req);
     if (!email) return json(res, 401, { error: 'not signed in' });
     if (envAuthMethod()) return json(res, 409, { error: 'Sign-in is configured by environment variables on this server.', code: 'env_managed' });
     const { provider, clientId, clientSecret, allowedEmails } = JSON.parse(raw.toString() || '{}');

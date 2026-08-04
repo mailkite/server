@@ -339,6 +339,10 @@ export class Store {
       .get(String(email || '').toLowerCase());
   }
   adminUserCount() { return this.db.prepare('SELECT COUNT(*) c FROM admin_users').get().c; }
+  /** Every console admin, oldest first — the first is the de-facto owner. */
+  adminUsers() {
+    return this.db.prepare('SELECT email FROM admin_users ORDER BY added ASC').all().map((r) => r.email);
+  }
   /** Recovery from a squatted first-visitor claim: wipe admins + sessions, seed anew. */
   resetAdmin(email) {
     this.db.prepare('DELETE FROM admin_users').run();
