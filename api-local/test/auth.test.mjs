@@ -207,19 +207,28 @@ test('unclaimed install: first email claims admin (WP-style), once; reset-admin 
       { env: { ...process.env, DATA_DIR: dir2 } });
     const revoked = await u2('/api/admin/overview', undefined, { cookie: c2 });
     assert.equal(revoked.status, 401, 'squatter session revoked by reset-admin');
-    // This instance has no mail channel, so the rescued admin signs in directly.
-    const rescued = await (await u2('/api/auth/request-link', { email: 'rescue@new.example' })).json();
-    assert.equal(rescued.signedIn, true, 'reset admin can sign in');
+    // The claim is closed now (an admin exists) and setup is still owed, so the network
+    // offers no way in — box access does: reset-admin prints a one-time sign-in link.
+    const rescueOut = execFileSync('node', [join(dir, 'cli.mjs'), 'signin-link', 'rescue@new.example'],
+      { env: { ...process.env, DATA_DIR: dir2 } }).toString();
+    const token = /\/login#token=(\S+)/.exec(rescueOut)?.[1];
+    assert.ok(token, `signin-link printed no token: ${rescueOut}`);
+    const verified = await u2('/api/auth/verify', { token });
+    assert.equal(verified.status, 200, 'the box-issued link signs the rescued admin in');
+    const rescuedCookie = (verified.headers.get('set-cookie') || '').split(';')[0];
+    const back = await u2('/api/admin/overview', undefined, { cookie: rescuedCookie });
+    assert.equal(back.status, 200, 'rescued admin is back in the console');
+    assert.equal((await (await u2('/api/auth/status')).json()).setupRequired, true, 'setup still owed');
   } finally {
     p2.kill();
     rmSync(dir2, { recursive: true, force: true });
   }
 });
 
-// --- no-mail-channel direct sign-in (Gabe 2026-08-03) --------------------------
-// With no SMARTHOST/MAILKITE_SEND_KEY the server can't deliver a link, so a known
-// admin email signs in directly rather than stranding the admin in the server log.
-test('no mail channel: direct admin sign-in, no session for strangers', async () => {
+// Claimed but not set up: the claiming session keeps working, but NO new session can
+// be minted by typing an email. The old "no mail channel → direct sign-in" behaviour is
+// gone — that window is one session long now (docs/auth-setup.md).
+test('setup owed: request-link mints no session, and says setup is required', async () => {
   const P3 = PORT + 2;
   const B3 = `http://127.0.0.1:${P3}`;
   const dir3 = mkdtempSync(join(tmpdir(), 'mk-nochan-'));
@@ -232,27 +241,20 @@ test('no mail channel: direct admin sign-in, no session for strangers', async ()
       try { await fetch(B3 + '/api/auth/status'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
     const s = await (await fetch(B3 + '/api/auth/status')).json();
-    assert.equal(s.mailChannel, false, 'status reports no mail channel');
+    assert.equal(s.needsSetup, false, 'ADMIN_EMAIL claims the install');
+    assert.equal(s.setupRequired, true, 'but a sign-in method is still owed');
+    assert.equal(s.method, null);
 
-    const r = await fetch(B3 + '/api/auth/request-link', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: ADMIN }),
-    });
-    const body = await r.json();
-    assert.equal(body.signedIn, true, 'admin signs in directly when no channel');
-    const cookie = (r.headers.get('set-cookie') || '').split(';')[0];
-    assert.match(cookie, /^mk_session=/);
-    const me = await fetch(B3 + '/api/admin/overview', { headers: { cookie, 'x-mailkite-ui': '1' } });
-    assert.equal(me.status, 200, 'that session works on the admin API');
-
-    const r2 = await fetch(B3 + '/api/auth/request-link', {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: 'stranger@nowhere.example' }),
-    });
-    const b2 = await r2.json();
-    assert.equal(b2.ok, true);
-    assert.ok(!b2.signedIn, 'no direct sign-in for non-admins');
-    assert.ok(!(r2.headers.get('set-cookie') || '').includes('mk_session='), 'no cookie for strangers');
+    for (const email of [ADMIN, 'stranger@nowhere.example']) {
+      const r = await fetch(B3 + '/api/auth/request-link', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const body = await r.json();
+      assert.equal(body.ok, true);
+      assert.ok(!body.signedIn, `no direct sign-in for ${email}`);
+      assert.ok(!(r.headers.get('set-cookie') || '').includes('mk_session='), `no cookie for ${email}`);
+    }
   } finally {
     p3.kill();
     rmSync(dir3, { recursive: true, force: true });
@@ -276,7 +278,10 @@ test('rate limiting counts failures only and resets for known admins', async () 
   const B4 = `http://127.0.0.1:${P4}`;
   const dir4 = mkdtempSync(join(tmpdir(), 'mk-rate-'));
   const p4 = spawn('node', [join(dir, 'server.mjs')], {
-    env: { ...process.env, DATA_DIR: dir4, HMAC_SECRET: SECRET, PORT: String(P4), ADMIN_EMAIL: ADMIN, SMARTHOST: '', MAILKITE_SEND_KEY: '' },
+    // A working channel, so admin requests take the real link path (the limiter is
+    // about who is asking, not about how the link travels).
+    env: { ...process.env, DATA_DIR: dir4, HMAC_SECRET: SECRET, PORT: String(P4), ADMIN_EMAIL: ADMIN,
+      MAILKITE_SEND_KEY: 'mk_live_stub', MAILKITE_SEND_URL: `http://127.0.0.1:${SEND_PORT}/v1/send` },
     stdio: 'ignore',
   });
   const ask = (email) => fetch(B4 + '/api/auth/request-link', {
@@ -286,11 +291,11 @@ test('rate limiting counts failures only and resets for known admins', async () 
     for (let i = 0; i < 60; i++) {
       try { await fetch(B4 + '/api/auth/status'); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
     }
-    // An admin signing in many times must never lock themselves out.
+    // An admin requesting a link many times must never lock themselves out.
     for (let i = 0; i < 15; i++) {
       const r = await ask(ADMIN);
       assert.equal(r.status, 200, `admin attempt ${i + 1} not rate-limited`);
-      assert.equal((await r.json()).signedIn, true);
+      assert.ok(!(await r.json()).signedIn, 'a link is sent — never a session outright');
     }
     // Unknown emails do accumulate, and the limit answers 429 (not a silent ok).
     for (let i = 0; i < 10; i++) await ask(`nobody${i}@nowhere.example`);

@@ -78,6 +78,23 @@ const SCHEMA = `
     token_hash TEXT PRIMARY KEY, email TEXT NOT NULL,
     created INTEGER NOT NULL, last_seen INTEGER NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS auth_config (          -- docs/auth-setup.md — one row
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    method TEXT,                       -- email_cloud | email_smtp | oauth_google | oauth_github
+    settings TEXT,                     -- JSON; holds secrets, never returned by any GET
+    verified_at INTEGER,               -- when the method was PROVEN to work
+    setup_complete INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE TABLE IF NOT EXISTS auth_setup_pending (   -- in-flight proof, promoted only on success
+    kind TEXT PRIMARY KEY,             -- 'email' | 'oauth'
+    method TEXT NOT NULL,
+    settings TEXT NOT NULL,            -- candidate config, NOT yet authoritative
+    code_hash TEXT,                    -- email: sha256 of the 6-digit code
+    state TEXT,                        -- oauth: CSRF state parameter
+    email TEXT,                        -- the admin doing the proving
+    expires INTEGER NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0
+  );
 `;
 
 export class Store {
@@ -366,6 +383,59 @@ export class Store {
   }
   deleteSession(raw) {
     if (raw) this.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(this.hashToken(raw));
+  }
+
+  // --- sign-in setup (docs/auth-setup.md) ---------------------------------------
+  // A method is only ever written here AFTER it has been proven to work: an emailed
+  // code that came back, or a completed OAuth round trip. Candidates live in
+  // auth_setup_pending until then, so a key that 401s can never be stored as
+  // "configured" — the state that once stranded an admin is unrepresentable.
+
+  /** @returns {{method: string|null, settings: object, verifiedAt: number|null, complete: boolean}} */
+  authConfig() {
+    const r = this.db.prepare('SELECT * FROM auth_config WHERE id = 1').get();
+    if (!r) return { method: null, settings: {}, verifiedAt: null, complete: false };
+    let settings = {};
+    try { settings = JSON.parse(r.settings || '{}'); } catch { /* corrupt row → treat as empty */ }
+    return { method: r.method, settings, verifiedAt: r.verified_at, complete: !!r.setup_complete };
+  }
+  /** Promote a proven method to the authoritative config. */
+  setAuthConfig(method, settings) {
+    this.db.prepare(
+      `INSERT INTO auth_config(id, method, settings, verified_at, setup_complete) VALUES (1, ?, ?, ?, 1)
+         ON CONFLICT(id) DO UPDATE SET method = excluded.method, settings = excluded.settings,
+                                       verified_at = excluded.verified_at, setup_complete = 1`)
+      .run(method, JSON.stringify(settings || {}), Date.now());
+  }
+  /** Box-level recovery: forget the method, revoke every session, re-open setup. */
+  resetAuth() {
+    this.db.prepare('DELETE FROM auth_config').run();
+    this.db.prepare('DELETE FROM auth_setup_pending').run();
+    this.db.prepare('DELETE FROM sessions').run();
+  }
+
+  putPendingSetup(kind, { method, settings, codeHash = null, state = null, email = null, ttlMs = 15 * 60 * 1000 }) {
+    this.db.prepare(
+      `INSERT INTO auth_setup_pending(kind, method, settings, code_hash, state, email, expires, attempts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 0)
+         ON CONFLICT(kind) DO UPDATE SET method = excluded.method, settings = excluded.settings,
+              code_hash = excluded.code_hash, state = excluded.state, email = excluded.email,
+              expires = excluded.expires, attempts = 0`)
+      .run(kind, method, JSON.stringify(settings || {}), codeHash, state, email, Date.now() + ttlMs);
+  }
+  pendingSetup(kind) {
+    const r = this.db.prepare('SELECT * FROM auth_setup_pending WHERE kind = ?').get(kind);
+    if (!r) return null;
+    if (Date.now() > r.expires) { this.clearPendingSetup(kind); return null; }
+    let settings = {};
+    try { settings = JSON.parse(r.settings || '{}'); } catch { /* corrupt → empty */ }
+    return { ...r, settings };
+  }
+  clearPendingSetup(kind) { this.db.prepare('DELETE FROM auth_setup_pending WHERE kind = ?').run(kind); }
+  /** @returns {number} attempts so far, so a code can't be brute-forced. */
+  bumpPendingAttempts(kind) {
+    this.db.prepare('UPDATE auth_setup_pending SET attempts = attempts + 1 WHERE kind = ?').run(kind);
+    return this.db.prepare('SELECT attempts FROM auth_setup_pending WHERE kind = ?').get(kind)?.attempts ?? 0;
   }
 
   // --- mailboxes / messages -----------------------------------------------------

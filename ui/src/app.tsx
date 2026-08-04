@@ -13,6 +13,7 @@ import { useConnection } from "@/providers/context"
 import { SignInScreen } from "@/screens/connect"
 import { LoginCallback } from "@/screens/login"
 import { SetupScreen } from "@/screens/setup"
+import { AuthSetupScreen } from "@/screens/auth-setup"
 import { DomainsScreen } from "@/screens/domains"
 import { MessagesScreen } from "@/screens/messages"
 import { CredentialsScreen } from "@/screens/credentials"
@@ -78,6 +79,9 @@ function UnauthedGate() {
 export function App() {
   const { connection, status } = useConnection()
   const [route, navigate] = useHashRoute()
+  // Claimed but no sign-in method yet: the console is gated on finishing setup, so the
+  // window where knowing the admin address is enough lasts one session (docs/auth-setup.md).
+  const auth = useQuery({ queryKey: ["auth-status"], queryFn: authStatus, staleTime: 0, enabled: !!connection })
 
   // Auth flows land on real paths (magic-link URLs survive # fragments better).
   const path = window.location.pathname
@@ -91,6 +95,10 @@ export function App() {
     )
   }
   if (!connection) return <UnauthedGate />
+
+  if (auth.data?.setupRequired) {
+    return <AuthSetupScreen onDone={() => auth.refetch()} />
+  }
 
   return (
     <AppShell active={route} onNavigate={navigate}>

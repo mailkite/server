@@ -3,18 +3,33 @@
 // loopback setups. Cloud: honest coming-soon card that routes to MailKite Cloud.
 
 import { useState, type FormEvent } from "react"
-import { useMutation } from "@tanstack/react-query"
-import { ArrowUpRight, ChevronDown, MailCheck, Send } from "lucide-react"
+import { useMutation, useQuery } from "@tanstack/react-query"
+import { ArrowUpRight, ChevronDown, KeyRound, MailCheck, Send } from "lucide-react"
 import { toast } from "sonner"
 import { Logo } from "@/components/logo"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { errMsg } from "@/lib/format"
-import { requestLink } from "@/providers/auth"
+import { authStatus, requestLink } from "@/providers/auth"
 import { LocalProvider } from "@/providers/local"
 import { useConnection } from "@/providers/context"
 import { cn } from "@/lib/utils"
+
+/** OAuth installs sign in at the provider — there is no email path to offer. */
+function OauthSignIn({ provider }: { provider: "google" | "github" }) {
+  const label = provider === "google" ? "Google" : "GitHub"
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">
+        This server signs in with {label}.
+      </p>
+      <Button className="w-full" onClick={() => { window.location.href = "/api/auth/oauth/start" }}>
+        <KeyRound className="size-4" /> Continue with {label}
+      </Button>
+    </div>
+  )
+}
 
 function MagicLinkForm() {
   const { signedIn } = useConnection()
@@ -139,6 +154,9 @@ function AdvancedSecretForm() {
 }
 
 export function SignInScreen() {
+  const status = useQuery({ queryKey: ["auth-status"], queryFn: authStatus, staleTime: 0 })
+  const method = status.data?.method ?? null
+  const oauth = method === "oauth_google" ? "google" : method === "oauth_github" ? "github" : null
   return (
     <div className="relative flex min-h-dvh items-center justify-center overflow-hidden bg-background px-4">
       <div className="brand-glow pointer-events-none absolute inset-0" aria-hidden />
@@ -158,10 +176,14 @@ export function SignInScreen() {
         <Card className="gradient-ring panel-lift">
           <CardHeader>
             <CardTitle>Sign in</CardTitle>
-            <CardDescription>Enter your admin email and we&rsquo;ll send a one-time sign-in link.</CardDescription>
+            <CardDescription>
+              {oauth
+                ? `Sign in with the ${oauth === "google" ? "Google" : "GitHub"} account this server allows.`
+                : "Enter your admin email and we\u2019ll send a one-time sign-in link."}
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <MagicLinkForm />
+            {oauth ? <OauthSignIn provider={oauth} /> : <MagicLinkForm />}
             <AdvancedSecretForm />
           </CardContent>
         </Card>

@@ -61,3 +61,12 @@ dispatch shows as an honest roadmap card instead of a broken screen.
 Everything else — `components/ui/*`, tokens (`index.css`), `logo`, `status-pill`,
 `load-more`, `confirm-dialog`, `lib/{format,addr,theme}` — is ported from the dashboard
 so improvements can flow both ways.
+
+## Sign-in setup gate
+
+After an install is claimed, `App` checks `/api/auth/status`; while `setupRequired` is
+true every screen is replaced by `screens/auth-setup.tsx` — choose an emailed-link path
+(MailKite Cloud key or SMTP) or OAuth (Google/GitHub). Nothing is saved until the server
+proves the method works, so a wrong key surfaces as an error here rather than as a
+locked-out console later. The sign-in screen then renders whichever method is in force:
+an email field, or "Continue with Google/GitHub". Spec: `../docs/auth-setup.md`.

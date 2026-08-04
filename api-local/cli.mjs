@@ -15,6 +15,13 @@
 //   node cli.mjs reset-admin <email>             → wipes web-console admins + sessions,
 //                                                  seeds <email> (recovery if someone
 //                                                  claimed an unclaimed install first)
+//   node cli.mjs signin-link [email]             → mint a one-time /login#token=… URL
+//                                                  (recovery when the provider is down)
+//   node cli.mjs auth-status                     → the configured sign-in method and
+//                                                  when it was last proven to work
+//   node cli.mjs reset-auth                      → clear the method, revoke sessions,
+//                                                  re-open setup (recovery when the
+//                                                  provider dies). docs/auth-setup.md
 //
 // DATA_DIR env selects the store (default ./data, same as the server).
 
@@ -66,6 +73,51 @@ switch (cmd) {
     if (!a) { console.error('usage: reset-admin <email>'); process.exit(1); }
     store.resetAdmin(a);
     console.log(`web-console admin reset → ${a.toLowerCase()} (all sessions revoked)`);
+    // Without this the rescue can brick the box: the claim is closed (an admin now
+    // exists) and, until setup completes, no session can be minted over the network.
+    console.log(`sign in with: /login#token=${store.createLoginToken(a)}`);
+    break;
+  }
+  // Mint a one-time sign-in link from the box. Shell access is already the root
+  // authority (it can read the database), so this weakens nothing — it just makes the
+  // documented recovery actually usable when the configured provider is down.
+  case 'signin-link': {
+    const email = a || store.db.prepare('SELECT email FROM admin_users ORDER BY added LIMIT 1').get()?.email;
+    if (!email) { console.error('usage: signin-link <email>   (no admins on record)'); process.exit(1); }
+    if (!store.isAdminUser(email)) { console.error(`${email} is not a console admin (run: reset-admin ${email})`); process.exit(1); }
+    console.log(`/login#token=${store.createLoginToken(email)}`);
+    console.log('(valid once, for 15 minutes — prefix it with your server URL)');
+    break;
+  }
+  // --- sign-in setup recovery (docs/auth-setup.md) ------------------------------
+  // Once setup is complete a broken provider means no console sign-in — correct, but
+  // it must never brick the box. Shell access is the root authority, so these two
+  // commands are the documented way back in.
+  case 'auth-status': {
+    const cfg = store.authConfig();
+    const envKey = process.env.MAILKITE_SEND_KEY ? 'MAILKITE_SEND_KEY' : (process.env.OAUTH_CLIENT_ID ? 'OAUTH_*' : null);
+    if (envKey) console.log(`method: set by environment (${envKey}) — this overrides any stored config`);
+    if (!cfg.method) {
+      console.log(envKey ? 'stored: none' : 'method: none — setup is owed; the console gates on finishing it');
+    } else {
+      const s = cfg.settings || {};
+      const detail = cfg.method === 'email_smtp' ? `${s.user ? `${s.user}@` : ''}${s.host}:${s.port}`
+        : cfg.method === 'email_cloud' ? `from ${s.from || '(default)'}`
+        : `${s.clientId ? `client ${String(s.clientId).slice(0, 12)}…` : ''} allow=[${(s.allowedEmails || []).join(', ')}]`;
+      console.log(`stored: ${cfg.method}  ${detail}`);
+      console.log(`verified: ${cfg.verifiedAt ? new Date(cfg.verifiedAt).toISOString() : 'never'}`);
+      console.log(`complete: ${cfg.complete}`);
+    }
+    const admins = store.db.prepare('SELECT email FROM admin_users ORDER BY email').all().map((r) => r.email);
+    console.log(`admins: ${admins.length ? admins.join(', ') : '(none — install is unclaimed)'}`);
+    break;
+  }
+  case 'reset-auth': {
+    store.resetAuth();
+    console.log('sign-in method cleared, all sessions revoked — setup re-opens on next visit');
+    if (process.env.MAILKITE_SEND_KEY || process.env.OAUTH_CLIENT_ID) {
+      console.log('NOTE: environment variables still configure a method; unset them to run the wizard');
+    }
     break;
   }
   case 'list': {
@@ -81,6 +133,6 @@ switch (cmd) {
     break;
   }
   default:
-    console.error('usage: cli.mjs add-user|add-domain|add-key|add-app-password|reset-admin|list …');
+    console.error('usage: cli.mjs add-user|add-domain|add-key|add-app-password|reset-admin|signin-link|auth-status|reset-auth|list …');
     process.exit(1);
 }

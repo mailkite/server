@@ -25,15 +25,71 @@ export async function verifyToken(token: string): Promise<string> {
   return body.email as string
 }
 
-/** Unclaimed install? Can the server send mail? Drives routing + sign-in copy. */
-export async function authStatus(): Promise<{ needsSetup: boolean; mailChannel: boolean }> {
+export type AuthMethod = "email_cloud" | "email_smtp" | "oauth_google" | "oauth_github"
+
+export type AuthStatus = {
+  /** Nobody has claimed this install yet — the first email entered becomes the admin. */
+  needsSetup: boolean
+  /** Claimed, but no sign-in method has been proven yet: the console gates on it. */
+  setupRequired: boolean
+  method: AuthMethod | null
+  mailChannel: boolean
+}
+
+/** Drives routing and which sign-in the screen offers. Never carries credentials. */
+export async function authStatus(): Promise<AuthStatus> {
+  const fallback: AuthStatus = { needsSetup: false, setupRequired: false, method: null, mailChannel: true }
   try {
     const res = await fetch("/api/auth/status", { headers: { "x-mailkite-ui": "1" } })
-    if (!res.ok) return { needsSetup: false, mailChannel: true }
-    return (await res.json()) as { needsSetup: boolean; mailChannel: boolean }
+    if (!res.ok) return fallback
+    return { ...fallback, ...((await res.json()) as Partial<AuthStatus>) }
   } catch {
-    return { needsSetup: false, mailChannel: true }
+    return fallback
   }
+}
+
+export type SetupState = {
+  state: "unclaimed" | "setup" | "complete"
+  method: AuthMethod | null
+  /** 'env' installs are configured by environment variables and can't be changed here. */
+  source: "env" | "configured" | null
+  verifiedAt: number | null
+  settings: Record<string, unknown>
+  pending: { kind: string; method: string; sentTo: string } | null
+  adminEmail: string
+}
+
+export async function setupState(): Promise<SetupState> {
+  const res = await fetch("/api/auth/setup-state", { headers: { "x-mailkite-ui": "1" } })
+  if (!res.ok) throw new Error("Could not read setup state.")
+  return (await res.json()) as SetupState
+}
+
+async function postOrThrow(path: string, body: unknown) {
+  const res = await post(path, body)
+  const data = await res.json().catch(() => ({}) as { error?: string })
+  if (!res.ok) throw new Error(data.error || "That didn't work.")
+  return data
+}
+
+export type SmtpFields = { host: string; port: string; user: string; pass: string; from: string }
+
+/** Send the verification code through the candidate config. Throws if it can't send. */
+export async function startEmailSetup(input: { mode: "cloud"; key: string; from: string } | { mode: "smtp"; smtp: SmtpFields }) {
+  const body = input.mode === "cloud"
+    ? { mode: "cloud", key: input.key, from: input.from }
+    : { mode: "smtp", smtp: { ...input.smtp, port: Number(input.smtp.port) || 587 } }
+  return postOrThrow("/api/auth/setup/email", body) as Promise<{ sent: boolean; to: string }>
+}
+
+export async function verifyEmailSetup(code: string) {
+  return postOrThrow("/api/auth/setup/email/verify", { code }) as Promise<{ method: AuthMethod }>
+}
+
+export async function startOauthSetup(input: {
+  provider: "google" | "github"; clientId: string; clientSecret: string; allowedEmails: string[]
+}) {
+  return postOrThrow("/api/auth/setup/oauth", input) as Promise<{ authorizeUrl: string }>
 }
 
 export async function completeSetup(email: string): Promise<string> {

@@ -15,7 +15,11 @@ import { createServer } from 'node:http';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
-import { parseSmarthost, relayExternal } from './lib/smarthost.mjs';
+import { parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
+import {
+  authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
+  newCode, newState, publicSettings, sendSetupCode, smtpCfg,
+} from './lib/auth-setup.mjs';
 import { matchesAddress, normalizePattern, splitAddress } from './lib/patterns.mjs';
 import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
 
@@ -51,18 +55,59 @@ const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^
 // access is the root credential).
 const ADMIN_EMAIL = (process.env.ADMIN_EMAIL || '').trim().toLowerCase();
 const SEND_KEY = process.env.MAILKITE_SEND_KEY || '';
-// Can this server email a sign-in link? Only the send API can do that — SMARTHOST
-// relays users' outbound mail and has no link path — so it alone decides whether
-// sign-in uses a magic link or direct admin sign-in. Delivery is still verified at
-// send time: see the request-link handler.
-const MAIL_CHANNEL = !!SEND_KEY;
 const MAGIC_FROM = process.env.MAGIC_LINK_FROM || '';
 // Configurable so tests can exercise the real link flow against a stub, and so a
 // self-hoster can point at their own compatible send endpoint.
 const SEND_URL = process.env.MAILKITE_SEND_URL || 'https://api.mailkite.dev/v1/send';
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 if (ADMIN_EMAIL) store.addAdminUser(ADMIN_EMAIL);
-const needsSetup = () => !ADMIN_EMAIL && store.adminUserCount() === 0;
+
+// ---- sign-in state machine (docs/auth-setup.md) ---------------------------------
+// unclaimed → claimed/setup-incomplete → complete. Direct sign-in exists ONLY in the
+// claim step, so "knows the admin address" is enough for exactly one session, not for
+// the life of the install.
+
+/**
+ * Env-supplied credentials are honoured as pre-configuration: a scripted deploy comes
+ * up already set up and never shows the wizard. Env always wins over the database.
+ */
+function envAuthMethod() {
+  if (SEND_KEY) return { method: 'email_cloud', settings: { key: SEND_KEY, from: MAGIC_FROM, url: SEND_URL }, source: 'env' };
+  const provider = (process.env.OAUTH_PROVIDER || '').trim().toLowerCase();
+  const clientId = process.env.OAUTH_CLIENT_ID || '';
+  const clientSecret = process.env.OAUTH_CLIENT_SECRET || '';
+  if ((provider === 'google' || provider === 'github') && clientId && clientSecret) {
+    const allowed = (process.env.OAUTH_ALLOWED_EMAILS || ADMIN_EMAIL || '')
+      .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+    return { method: `oauth_${provider}`, settings: { clientId, clientSecret, allowedEmails: allowed }, source: 'env' };
+  }
+  return null;
+}
+
+/** The method actually in force, or null while setup is still owed. */
+function effectiveAuth() {
+  const env = envAuthMethod();
+  if (env) return env;
+  const cfg = store.authConfig();
+  return cfg.complete && cfg.method ? { method: cfg.method, settings: cfg.settings, source: 'configured' } : null;
+}
+
+const unclaimed = () => !ADMIN_EMAIL && store.adminUserCount() === 0;
+/** Claimed, but no proven sign-in method yet: the console is gated on finishing setup. */
+const setupOwed = () => !unclaimed() && !effectiveAuth();
+
+/** Where the provider sends the user back. Must match what was sent to `authorize`. */
+const oauthRedirect = (req) => `${scheme}://${req.headers.host}/api/auth/oauth/callback`;
+
+/** OAuth errors land in a browser, not a fetch — render a readable page, not JSON. */
+function oauthFail(res, message) {
+  res.writeHead(400, { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' });
+  const safe = String(message).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+  return res.end(`<!doctype html><meta charset="utf-8"><title>Sign-in failed</title>`
+    + `<body style="font:15px/1.5 system-ui;max-width:34rem;margin:14vh auto;padding:0 1.5rem;background:#0b0d12;color:#e6e8ee">`
+    + `<h1 style="font-size:1.1rem">Sign-in failed</h1><p style="color:#9aa3b2">${safe}</p>`
+    + `<p><a href="/" style="color:#6ea8fe">Back to sign in</a></p>`);
+}
 
 const getCookie = (req, name) => {
   for (const part of String(req.headers.cookie || '').split(';')) {
@@ -79,30 +124,36 @@ const clientIp = (req) => String(req.socket.remoteAddress || '').replace(/^::fff
 const setSessionCookie = (res, raw, maxAge = 30 * 24 * 60 * 60) =>
   res.setHeader('set-cookie', `mk_session=${raw}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${maxAge}${scheme === 'https' ? '; Secure' : ''}`);
 
-/** @returns {Promise<boolean>} true only if the link was actually handed to a mail path. */
-async function deliverLink(email, url) {
-  if (!SEND_KEY) {
-    console.log(`magic-link: ${url}`); // greppable fallback: journalctl … | grep magic-link
-    return false;
-  }
-  const from = MAGIC_FROM || `no-reply@${store.domains()[0] || 'localhost'}`;
+const defaultFrom = () => MAGIC_FROM || `no-reply@${store.domains()[0] || 'localhost'}`;
+
+/**
+ * Send a sign-in link over whichever email method setup proved.
+ * @returns {Promise<boolean>} true only if the mail was actually accepted for delivery.
+ */
+async function deliverLink(auth, email, url) {
+  const subject = 'Sign in to MailKite Server';
+  const text = `Click to sign in to your MailKite Server console:\n\n${url}\n\n`
+    + `The link works once and expires in 15 minutes. If you didn't request it, ignore this email.`;
+  const from = auth.settings.from || defaultFrom();
   try {
-    const r = await fetch(SEND_URL, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${SEND_KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        from, to: email,
-        subject: 'Sign in to MailKite Server',
-        text: `Click to sign in to your MailKite Server console:\n\n${url}\n\nThe link works once and expires in 15 minutes. If you didn't request it, ignore this email.`,
-      }),
-    });
-    if (!r.ok) {
-      console.error(`magic-link: send failed (${r.status}) — falling back to log\nmagic-link: ${url}`);
-      return false;
+    if (auth.method === 'email_cloud') {
+      const r = await fetch(auth.settings.url || SEND_URL, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${auth.settings.key}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ from, to: email, subject, text }),
+      });
+      if (!r.ok) throw new Error(`send API ${r.status}`);
+      return true;
     }
-    return true;
+    if (auth.method === 'email_smtp') {
+      await sendViaSmtp(smtpCfg(auth.settings), { from, to: email, subject, text });
+      return true;
+    }
+    return false;
   } catch (e) {
-    console.error(`magic-link: send error (${e.message}) — falling back to log\nmagic-link: ${url}`);
+    // The link is logged so the operator can still recover from the box, but no session
+    // is issued — see the request-link handler for why this fails closed.
+    console.error(`magic-link: send failed (${e.message})\nmagic-link: ${url}`);
     return false;
   }
 }
@@ -340,26 +391,23 @@ Object.assign(routes, {
       return json(res, 429, { error: 'Too many sign-in attempts. Try again in a few minutes.', code: 'rate_limited' });
     }
     const { email } = JSON.parse(raw.toString() || '{}');
+    const auth = effectiveAuth();
+    // Claimed but not set up: the claiming session still works, but no NEW session can
+    // be minted by typing an email. That window is one session long, by design.
+    if (!auth) return json(res, 200, { ok: true, setupRequired: true });
+    // OAuth installs have no email path at all.
+    if (isOauthMethod(auth.method)) {
+      return json(res, 200, { ok: true, oauth: auth.method === 'oauth_google' ? 'google' : 'github' });
+    }
     if (typeof email === 'string' && store.isAdminUser(email)) {
       store.authOk(ip); // known admin — clear any accumulated failures
-      // No way to deliver mail → emailing a link would strand the admin in the server
-      // log. In that mode knowing the admin address IS the credential: sign in directly.
-      // (Deliberate: enumeration is moot when the email is the credential; per-IP rate
-      // limiting above still applies. Configure SMARTHOST/MAILKITE_SEND_KEY to require
-      // link verification.)
-      if (!MAIL_CHANNEL) {
-        console.warn(`auto-login (no mail channel configured): ${email.toLowerCase()} ip=${clientIp(req)}`);
-        setSessionCookie(res, store.createSession(email.toLowerCase()));
-        return json(res, 200, { ok: true, signedIn: true, email: email.toLowerCase() });
-      }
       const token = store.createLoginToken(email);
-      const delivered = await deliverLink(email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
-      // FAIL CLOSED. A configured channel means sign-in is verified by email, so a
-      // delivery failure must NOT hand out a session: otherwise any outage — or one an
-      // attacker waits for — downgrades authentication to "knows the admin address".
-      // The link is logged instead, so the operator can still recover from the box.
+      const delivered = await deliverLink(auth, email.toLowerCase(), `${scheme}://${req.headers.host}/login#token=${token}`);
+      // FAIL CLOSED. Sign-in is verified by email, so a delivery failure must NOT hand
+      // out a session: otherwise any outage — or one an attacker waits for — downgrades
+      // authentication to "knows the admin address". Recovery is `cli.mjs reset-auth`.
       if (!delivered) {
-        console.error(`magic-link: NOT delivered for ${email.toLowerCase()} — session refused; use the logged link above, or unset MAILKITE_SEND_KEY to allow direct admin sign-in`);
+        console.error(`magic-link: NOT delivered for ${email.toLowerCase()} — session refused; use the logged link above, or run: node cli.mjs reset-auth`);
       }
       return json(res, 200, { ok: true });
     }
@@ -382,12 +430,21 @@ Object.assign(routes, {
     const email = uiSession(req);
     return email ? json(res, 200, { email }) : json(res, 401, { error: 'not signed in' });
   },
-  // Unclaimed-install probe for the web console's routing.
-  'GET /api/auth/status': async (req, res) => json(res, 200, { needsSetup: needsSetup(), mailChannel: MAIL_CHANNEL }),
+  // Routing probe for the web console. Which METHOD is in force is not a secret (the
+  // sign-in screen has to render it); its credentials never appear here.
+  'GET /api/auth/status': async (req, res) => {
+    const auth = effectiveAuth();
+    return json(res, 200, {
+      needsSetup: unclaimed(),
+      setupRequired: setupOwed(),
+      method: auth?.method ?? null,
+      mailChannel: !!auth && isEmailMethod(auth.method),
+    });
+  },
   // First-visitor admin claim (WordPress-style): only while the install has no admin
   // and no ADMIN_EMAIL. Recovery from a squatted claim: `cli.mjs reset-admin <email>`.
   'POST /api/auth/setup': async (req, res, raw) => {
-    if (!needsSetup()) {
+    if (!unclaimed()) {
       return json(res, 403, { error: 'Setup is not available — an admin already exists.', code: 'no_setup' });
     }
     const { email } = JSON.parse(raw.toString() || '{}');
@@ -397,6 +454,173 @@ Object.assign(routes, {
     setSessionCookie(res, store.createSession(email));
     return json(res, 200, { ok: true, email: email.toLowerCase() });
   },
+  // ---- sign-in setup (docs/auth-setup.md) ---------------------------------------
+  // All session-authed: only someone already inside the console may choose how future
+  // sign-ins are verified.
+
+  'GET /api/auth/setup-state': async (req, res) => {
+    const email = uiSession(req);
+    if (!email) return json(res, 401, { error: 'not signed in' });
+    const auth = effectiveAuth();
+    const cfg = store.authConfig();
+    const pendingEmail = store.pendingSetup('email');
+    return json(res, 200, {
+      state: unclaimed() ? 'unclaimed' : auth ? 'complete' : 'setup',
+      method: auth?.method ?? null,
+      source: auth?.source ?? null,          // 'env' installs can't be changed from here
+      verifiedAt: cfg.verifiedAt ?? null,
+      settings: auth ? publicSettings(auth.method, auth.settings) : {},
+      pending: pendingEmail ? { kind: 'email', method: pendingEmail.method, sentTo: pendingEmail.email } : null,
+      adminEmail: email,
+    });
+  },
+
+  // Prove an email path: send a real code through the CANDIDATE config. Nothing is
+  // persisted as authoritative here — a key that 401s fails loudly instead.
+  'POST /api/auth/setup/email': async (req, res, raw) => {
+    const email = uiSession(req);
+    if (!email) return json(res, 401, { error: 'not signed in' });
+    if (envAuthMethod()) return json(res, 409, { error: 'Sign-in is configured by environment variables on this server.', code: 'env_managed' });
+    const body = JSON.parse(raw.toString() || '{}');
+    const mode = body.mode === 'smtp' ? 'smtp' : 'cloud';
+    let method, settings;
+    if (mode === 'cloud') {
+      const key = String(body.key || '').trim();
+      if (!key) return json(res, 400, { error: 'Enter a MailKite Cloud API key.', code: 'bad_key' });
+      method = 'email_cloud';
+      settings = { key, from: String(body.from || '').trim() || defaultFrom(), url: SEND_URL };
+    } else {
+      const s = body.smtp || {};
+      const missing = ['host', 'from'].filter((k) => !String(s[k] || '').trim());
+      if (missing.length) return json(res, 400, { error: `Missing SMTP ${missing.join(' and ')}.`, code: 'bad_smtp' });
+      method = 'email_smtp';
+      settings = {
+        host: String(s.host).trim(), port: Number(s.port) || 587,
+        user: String(s.user || '').trim(), pass: String(s.pass || ''),
+        from: String(s.from).trim(),
+      };
+    }
+    const code = newCode();
+    try {
+      await sendSetupCode({ method, settings, to: email, code, sendUrl: SEND_URL });
+    } catch (e) {
+      // Proof failed → nothing stored. This is the whole point of the flow.
+      return json(res, 400, { error: `Couldn't send the verification email — ${e.message}`, code: 'send_failed' });
+    }
+    store.putPendingSetup('email', { method, settings, codeHash: hashCode(code), email });
+    console.log(`sign-in setup: verification code sent to ${email} via ${method}`);
+    return json(res, 200, { sent: true, to: email });
+  },
+
+  // The code came back → the path demonstrably works → promote it.
+  'POST /api/auth/setup/email/verify': async (req, res, raw) => {
+    const email = uiSession(req);
+    if (!email) return json(res, 401, { error: 'not signed in' });
+    const pending = store.pendingSetup('email');
+    if (!pending) return json(res, 400, { error: 'That code expired — send a new one.', code: 'no_pending' });
+    if (store.bumpPendingAttempts('email') > 5) {
+      store.clearPendingSetup('email');
+      return json(res, 429, { error: 'Too many attempts — send a new code.', code: 'too_many_attempts' });
+    }
+    const { code } = JSON.parse(raw.toString() || '{}');
+    if (!codeMatches(code, pending.code_hash)) {
+      return json(res, 400, { error: "That code doesn't match.", code: 'bad_code' });
+    }
+    store.setAuthConfig(pending.method, pending.settings);
+    store.clearPendingSetup('email');
+    console.log(`sign-in setup complete: ${pending.method} (verified by ${email})`);
+    return json(res, 200, { ok: true, method: pending.method });
+  },
+
+  // Stage an OAuth candidate and hand back the authorize URL. Completing the round
+  // trip is the proof; nothing is authoritative until the callback succeeds.
+  'POST /api/auth/setup/oauth': async (req, res, raw) => {
+    const email = uiSession(req);
+    if (!email) return json(res, 401, { error: 'not signed in' });
+    if (envAuthMethod()) return json(res, 409, { error: 'Sign-in is configured by environment variables on this server.', code: 'env_managed' });
+    const { provider, clientId, clientSecret, allowedEmails } = JSON.parse(raw.toString() || '{}');
+    if (provider !== 'google' && provider !== 'github') {
+      return json(res, 400, { error: 'Choose Google or GitHub.', code: 'bad_provider' });
+    }
+    if (!String(clientId || '').trim() || !String(clientSecret || '').trim()) {
+      return json(res, 400, { error: 'Enter the client ID and secret.', code: 'bad_client' });
+    }
+    const allowed = (Array.isArray(allowedEmails) ? allowedEmails : [])
+      .map((e) => String(e).trim().toLowerCase()).filter((e) => EMAIL_RE.test(e));
+    // The admin doing setup must be able to get back in, or completing setup would
+    // lock them out of their own console.
+    if (!allowed.includes(email.toLowerCase())) allowed.unshift(email.toLowerCase());
+    const state = newState();
+    const settings = { clientId: String(clientId).trim(), clientSecret: String(clientSecret).trim(), allowedEmails: allowed };
+    store.putPendingSetup('oauth', { method: `oauth_${provider}`, settings, state, email });
+    const url = authorizeUrl({ provider, clientId: settings.clientId, redirectUri: oauthRedirect(req), state });
+    return json(res, 200, { authorizeUrl: url, allowedEmails: allowed });
+  },
+
+  // Start an OAuth SIGN-IN (setup already complete): 302 to the provider.
+  'GET /api/auth/oauth/start': async (req, res) => {
+    const auth = effectiveAuth();
+    if (!auth || !isOauthMethod(auth.method)) {
+      return json(res, 400, { error: 'This server does not use OAuth sign-in.', code: 'not_oauth' });
+    }
+    const provider = auth.method === 'oauth_google' ? 'google' : 'github';
+    const state = newState();
+    store.putPendingSetup('oauth_login', { method: auth.method, settings: {}, state, ttlMs: 10 * 60 * 1000 });
+    res.writeHead(302, { location: authorizeUrl({ provider, clientId: auth.settings.clientId, redirectUri: oauthRedirect(req), state }) });
+    return res.end();
+  },
+
+  // One callback serves both legs: proving a new OAuth config, and ordinary sign-in.
+  'GET /api/auth/oauth/callback': async (req, res) => {
+    const q = new URL(req.url, 'http://x').searchParams;
+    const code = q.get('code');
+    const state = q.get('state');
+    if (!code || !state) return oauthFail(res, 'The provider did not return an authorization code.');
+
+    const setupPending = store.pendingSetup('oauth');
+    const loginPending = store.pendingSetup('oauth_login');
+    const isSetup = !!setupPending && constEq(setupPending.state || '', state);
+    const isLogin = !isSetup && !!loginPending && constEq(loginPending.state || '', state);
+    // A mismatched state is CSRF (or a stale tab) — never proceed on it.
+    if (!isSetup && !isLogin) return oauthFail(res, 'That sign-in attempt expired or did not match. Try again.');
+
+    const auth = isSetup
+      ? { method: setupPending.method, settings: setupPending.settings }
+      : effectiveAuth();
+    if (!auth || !isOauthMethod(auth.method)) return oauthFail(res, 'OAuth is not configured on this server.');
+    const provider = auth.method === 'oauth_google' ? 'google' : 'github';
+
+    let email;
+    try {
+      email = await fetchOauthEmail({
+        provider, clientId: auth.settings.clientId, clientSecret: auth.settings.clientSecret,
+        redirectUri: oauthRedirect(req), code,
+      });
+    } catch (e) {
+      console.error(`oauth: ${e.message}`);
+      return oauthFail(res, `Sign-in with ${provider} failed: ${e.message}`);
+    }
+
+    const allowed = (auth.settings.allowedEmails || []).map((s) => String(s).toLowerCase());
+    if (!allowed.includes(email)) {
+      console.warn(`oauth: refused ${email} — not in the allow-list`);
+      return oauthFail(res, `${email} is not on this server's allow-list.`);
+    }
+
+    if (isSetup) {
+      store.setAuthConfig(setupPending.method, setupPending.settings);
+      store.clearPendingSetup('oauth');
+      for (const e of allowed) store.addAdminUser(e);
+      console.log(`sign-in setup complete: ${setupPending.method} (verified by ${email})`);
+    } else {
+      store.clearPendingSetup('oauth_login');
+    }
+    store.addAdminUser(email);
+    setSessionCookie(res, store.createSession(email));
+    res.writeHead(302, { location: '/' });
+    return res.end();
+  },
+
   // Invite another console admin (admin-only).
   'POST /api/admin/users': async (req, res, raw) => {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
@@ -689,7 +913,11 @@ startScanner(store, Number(process.env.WEBHOOK_SCAN_MS || 30_000));
 
 server.listen(PORT, HOST, () => {
   console.log(`api-local listening on ${scheme}://${HOST}:${PORT} (data: ${DATA_DIR})`);
-  if (needsSetup()) {
+  if (unclaimed()) {
     console.log('setup: no admin configured — the first email entered on the web console claims this install (recover with: cli.mjs reset-admin <email>)');
+  } else if (setupOwed()) {
+    console.log('setup: sign-in method not chosen yet — finish setup in the web console (docs/auth-setup.md)');
+  } else {
+    console.log(`sign-in: ${effectiveAuth().method} (${effectiveAuth().source})`);
   }
 });

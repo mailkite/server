@@ -160,6 +160,39 @@ function relayViaSmtp(cfg, raw, rcpts, mailfrom, { timeoutMs = 30000 } = {}) {
 }
 
 /**
+ * Compose a minimal RFC822 message. Used for mail the server itself originates
+ * (sign-in links, setup verification codes) rather than mail it relays.
+ */
+export function buildMessage({ from, to, subject, text }) {
+  const date = new Date().toUTCString();
+  // Non-ASCII subjects need encoding; base64 RFC2047 is the simple, always-valid form.
+  const subj = /^[\x20-\x7e]*$/.test(subject)
+    ? subject
+    : `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
+  return [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subj}`,
+    `Date: ${date}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    text,
+  ].join('\r\n');
+}
+
+/**
+ * Send one message through an SMTP smarthost config. Same client the relay path
+ * uses — the sign-in flow shouldn't carry a second SMTP implementation.
+ * Throws with a human-readable reason (bad host, refused AUTH, rejected recipient).
+ */
+export async function sendViaSmtp(cfg, { from, to, subject, text }) {
+  const raw = buildMessage({ from, to, subject, text });
+  await relayViaSmtp(cfg, raw, [to], from);
+  return true;
+}
+
+/**
  * Deliver `raw` to external recipients through the configured smarthost.
  * Returns { mode, relayed } — or throws with a human-readable reason.
  */

@@ -48,7 +48,33 @@ MX edge). Hosted variants: [`../deploy/fly.md`](../deploy/fly.md) ·
 [`../deploy/railway.md`](../deploy/railway.md). One replica only — SQLite is
 single-writer; `/data` is the database, back it up.
 
-## Web console auth (magic link)
+## Web console auth
+
+Sign-in follows the state machine in [`../docs/auth-setup.md`](../docs/auth-setup.md):
+
+| State | Sign-in |
+|---|---|
+| Unclaimed (no admin, no `ADMIN_EMAIL`) | the first email entered claims the install and gets **one** session |
+| Claimed, setup incomplete | that session works; the console gates on "Finish sign-in setup" and no new session can be minted by typing an email |
+| Setup complete | only the chosen method authenticates — emailed link (Cloud key or SMTP) or OAuth (Google/GitHub) |
+
+A method is only stored once **proven**: the emailed six-digit code came back, or an
+OAuth round trip completed. A key that 401s can't be saved as "configured".
+
+Recovery, since a dead provider must not brick the box (shell access is the root
+authority — it can read the database anyway):
+
+```sh
+node cli.mjs auth-status     # method, and when it was last proven
+node cli.mjs signin-link     # one-time /login#token=… URL
+node cli.mjs reset-auth      # clear the method, revoke sessions, re-open setup
+```
+
+Env vars pre-configure an install: `MAILKITE_SEND_KEY` (or `OAUTH_PROVIDER` +
+`OAUTH_CLIENT_ID` + `OAUTH_CLIENT_SECRET` + `OAUTH_ALLOWED_EMAILS`) satisfy setup, and
+`ADMIN_EMAIL` skips the claim — a scripted deploy never shows a wizard.
+
+### Details (magic link)
 
 **Sign-in mode depends on whether this server can send mail:**
 
