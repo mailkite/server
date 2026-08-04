@@ -180,7 +180,7 @@ export function AuthSetupScreen({ onDone }: { onDone: () => void }) {
                 working outbound path.
               </p>
               <Input aria-label="MailKite Cloud API key" type="password" placeholder="mk_live_…" value={key} onChange={(e) => setKey(e.target.value)} autoComplete="off" />
-              <Input aria-label="From address" placeholder="From address — no-reply@yourdomain.com" value={from} onChange={(e) => setFrom(e.target.value)} autoComplete="off" spellCheck={false} />
+              <Input aria-label="From address" placeholder="From address — no-reply@a-domain-verified-in-your-cloud-account.com" value={from} onChange={(e) => setFrom(e.target.value)} autoComplete="off" spellCheck={false} />
               <Button type="submit" className="w-full" disabled={send.isPending || !key.trim()}>
                 {send.isPending ? "Sending a test email…" : "Send verification code"}
               </Button>

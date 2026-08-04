@@ -21,8 +21,29 @@ const CLOUD = {
   429: { code: 'rate_limited', error: 'MailKite Cloud is rate-limiting this account. Wait a minute and try again.' },
 };
 
+// The status alone is ambiguous — the cloud answers 404 both for a path that doesn't
+// exist and for a From domain the account doesn't own. Its machine code disambiguates,
+// so read that first and only fall back to the status.
+const CLOUD_CODES = {
+  domain_not_owned: {
+    code: 'from_not_verified',
+    error: "That From address isn't on a domain verified in your MailKite Cloud account. Add and verify the domain at app.mailkite.dev → Domains, or use an address on one you already have.",
+  },
+  from_domain: {
+    code: 'from_not_verified',
+    error: 'MailKite Cloud refused that From address — its domain must be verified on the account the key belongs to.',
+  },
+  bad_key: { code: 'bad_key', error: 'MailKite Cloud rejected that API key. Copy a full key (starting mk_live_) from app.mailkite.dev → API keys.' },
+  email_not_verified: { code: 'account_unverified', error: 'That cloud account has not verified its email address yet, so it cannot send.' },
+  suppressed: { code: 'suppressed', error: 'The recipient is on that account\'s suppression list, so the cloud refused to send.' },
+};
+
 /** Map a cloud send failure (HTTP status + body) to something actionable. */
 export function cloudSendError(status, body = '') {
+  let upstream = null;
+  try { upstream = JSON.parse(body); } catch { /* not JSON — fall back to status */ }
+  const byCode = upstream?.code && CLOUD_CODES[upstream.code];
+  if (byCode) return { ...byCode, detail: trim(body) };
   const hit = CLOUD[status];
   if (hit) return { ...hit, detail: trim(body) };
   if (status >= 500) {
