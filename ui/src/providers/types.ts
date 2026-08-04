@@ -56,6 +56,26 @@ export type NewAppPassword = {
   label?: string | null
 }
 
+/** A message composed in the console. Bcc is envelope-only — never a header. */
+export type Compose = {
+  from: string
+  to: string
+  cc?: string
+  bcc?: string
+  subject: string
+  text: string
+}
+
+/** What actually happened to a composed message — the console reports this verbatim. */
+export type SendResult = {
+  stored: boolean
+  messageId: string
+  localDelivered: number
+  external: number
+  smarthost: "cloud" | "smtp" | null
+  relayed: number
+}
+
 export type WebhookConfig = { domain: string; url: string | null; secret?: string | null }
 
 export type Delivery = {
@@ -84,6 +104,8 @@ export interface MailProvider {
   addDomain(domain: string): Promise<void>
   messages(mailbox: Mailbox, opts?: { limit?: number; before?: number }): Promise<MessagePage>
   rawMessage(mailbox: Mailbox, uid: number): Promise<string>
+  /** Compose and send — the same pipeline the submission edge feeds. */
+  send(message: Compose): Promise<SendResult>
   credentials(): Promise<{ apiKeys: string[]; appPasswords: string[] }>
   createKey(): Promise<string>
   /** App passwords — mailbox access for a mail client, an app, or an agent. */

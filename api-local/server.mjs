@@ -12,16 +12,18 @@
 //      SMARTHOST (cloud | smtp[s]://user:pass@host:port), MAILKITE_SEND_KEY
 
 import { createServer } from 'node:http';
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { hostname } from 'node:os';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject } from './lib/rfc822.mjs';
-import { parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
+import { buildMessage, parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
 import {
   authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
   cloudSendingDomains, newCode, newState, publicSettings, sendSetupCode, smtpCfg,
 } from './lib/auth-setup.mjs';
 import { matchesAddress, normalizePattern, splitAddress } from './lib/patterns.mjs';
 import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
+import { transportError } from './lib/errors.mjs';
 
 const SECRET = process.env.HMAC_SECRET || '';
 const PORT = Number(process.env.PORT || 8787);
@@ -35,6 +37,9 @@ if (!SECRET) { console.error('api-local: HMAC_SECRET is required'); process.exit
 const store = new Store(DATA_DIR);
 // Outbound to recipients we don't host: cloud relay, an SMTP smarthost, or nothing.
 const SMARTHOST = parseSmarthost();
+// Right-hand side of Message-ID. A container's hostname is often random and useless
+// for tracing, so let a deploy pin it; the local hostname is only the fallback.
+const MESSAGE_ID_HOST = process.env.MESSAGE_ID_HOST || hostname() || 'mailkite-server';
 
 const readBody = (req) => new Promise((resolve, reject) => {
   const chunks = []; let n = 0;
@@ -178,6 +183,42 @@ function metaFrom(raw, extra = {}) {
   };
 }
 
+/**
+ * The outbound pipeline: store the Sent copy, loop-deliver to recipients this server
+ * hosts, hand the rest to the smarthost. Shared by /api/relay (mail arriving from the
+ * submission edge) and the console's compose (/api/admin/send) so both obey the same
+ * rules — a second copy of this would be a second place for delivery to drift.
+ *
+ * Callers own the From gate and their own error shape. A smarthost failure throws with
+ * `localDelivered` attached, because by then the Sent copy and local deliveries have
+ * already happened and the caller has to say so.
+ */
+async function deliverOutbound({ userId, raw, meta, rcpts }) {
+  store.storeMessage(userId, 'Sent', raw, { ...meta, flags: 'Seen', rcpt: rcpts.join(',') });
+  const external = [];
+  let localDelivered = 0;
+  for (const rcpt of rcpts) {
+    const rcptUser = store.userForDomain(rcpt.split('@')[1] || '');
+    if (rcptUser != null) {
+      store.storeMessage(rcptUser, 'INBOX', raw, metaFrom(raw, { to_addr: rcpt, mailfrom: meta.from_addr, rcpt }));
+      localDelivered++;
+    } else external.push(rcpt);
+  }
+  let relayed = 0;
+  if (external.length && SMARTHOST) {
+    try {
+      ({ relayed } = await relayExternal(SMARTHOST, raw, external, meta.from_addr));
+      console.log(`outbound: ${relayed} external recipient(s) via ${SMARTHOST.mode} smarthost`);
+    } catch (e) {
+      console.error(`outbound: smarthost (${SMARTHOST.mode}) failed — ${e.message}`);
+      throw Object.assign(new Error('smarthost delivery failed'), { cause: e, localDelivered });
+    }
+  } else if (external.length) {
+    console.warn(`outbound: ${external.length} external recipient(s) NOT delivered (no SMARTHOST configured)`);
+  }
+  return { localDelivered, external, relayed };
+}
+
 // The A record for a mail host must point at this server, so tell the web console what
 // this server's public address actually is instead of making the admin look it up:
 // resolve the hostname they're browsing (already public by definition), and fall back to
@@ -302,36 +343,20 @@ const routes = {
     }
     const rcpts = String(req.headers['x-mailkite-rcpt'] || '').split(',').map((s) => s.trim()).filter(Boolean);
     if (!rcpts.length) return json(res, 400, { error: 'no recipients', code: 'no_rcpt' });
-    store.storeMessage(userId, 'Sent', raw, { ...meta, flags: 'Seen', rcpt: rcpts.join(',') });
-    // Loop-delivery: recipients on locally-hosted domains land in their INBOX.
-    const externalRcpts = [];
-    let local = 0;
-    for (const rcpt of rcpts) {
-      const rcptUser = store.userForDomain(rcpt.split('@')[1] || '');
-      if (rcptUser != null) { store.storeMessage(rcptUser, 'INBOX', raw, metaFrom(raw, { to_addr: rcpt, mailfrom: meta.from_addr, rcpt })); local++; }
-      else externalRcpts.push(rcpt);
-    }
-    // Everyone else goes out through the smarthost, if one is configured.
-    let relayed = 0;
-    if (externalRcpts.length && SMARTHOST) {
-      try {
-        ({ relayed } = await relayExternal(SMARTHOST, raw, externalRcpts, meta.from_addr));
-        console.log(`relay: ${relayed} external recipient(s) via ${SMARTHOST.mode} smarthost`);
-      } catch (e) {
-        // The Sent copy is already stored; report the failure so the SMTP edge
-        // tempfails and the client retries rather than silently losing the mail.
-        console.error(`relay: smarthost (${SMARTHOST.mode}) failed — ${e.message}`);
-        return json(res, 502, { error: `smarthost delivery failed: ${e.message}`, code: 'smarthost_failed', localDelivered: local });
-      }
-    } else if (externalRcpts.length) {
-      console.warn(`relay: ${externalRcpts.length} external recipient(s) NOT delivered (no SMARTHOST configured)`);
+    let out;
+    try {
+      out = await deliverOutbound({ userId, raw, meta, rcpts });
+    } catch (e) {
+      // The Sent copy is already stored; report the failure so the SMTP edge
+      // tempfails and the client retries rather than silently losing the mail.
+      return json(res, 502, { error: `smarthost delivery failed: ${e.cause?.message ?? e.message}`, code: 'smarthost_failed', localDelivered: e.localDelivered ?? 0 });
     }
     return json(res, 200, {
       ok: true,
-      localDelivered: local,
-      externalSkipped: SMARTHOST ? 0 : externalRcpts.length,
+      localDelivered: out.localDelivered,
+      externalSkipped: SMARTHOST ? 0 : out.external.length,
       smarthost: SMARTHOST ? SMARTHOST.mode : null,
-      relayed,
+      relayed: out.relayed,
     });
   },
 
@@ -806,6 +831,73 @@ Object.assign(routes, {
     if (!bytes) return json(res, 404, { error: 'raw unavailable', code: 'no_raw' });
     res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
     return res.end(bytes);
+  },
+
+  // Compose from the web console. Same pipeline as the submission edge — this only
+  // builds the message the edge would have received, then hands it to deliverOutbound.
+  'POST /api/admin/send': async (req, res, raw) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(raw.toString() || '{}'); } catch { return json(res, 400, { error: 'Malformed request.', code: 'bad_json' }); }
+
+    const from = String(body.from || '').trim();
+    if (!EMAIL_RE.test(from)) return json(res, 400, { error: 'Enter the address this should be sent from.', code: 'bad_from' });
+    // Same gate the relay applies: this server only sends as domains it hosts.
+    const fromDomain = (from.split('@')[1] || '').toLowerCase();
+    const userId = store.userForDomain(fromDomain);
+    if (userId == null) {
+      return json(res, 403, {
+        error: `This server doesn't host ${fromDomain} — add the domain first, or send from one it already hosts.`,
+        code: 'from_domain',
+      });
+    }
+
+    const list = (v) => (Array.isArray(v) ? v : String(v ?? '').split(',')).map((s) => s.trim()).filter(Boolean);
+    const to = list(body.to), cc = list(body.cc), bcc = list(body.bcc);
+    const rcpts = [...new Set([...to, ...cc, ...bcc])];
+    if (!rcpts.length) return json(res, 400, { error: 'Add at least one recipient.', code: 'no_rcpt' });
+    const malformed = rcpts.filter((r) => !EMAIL_RE.test(r));
+    if (malformed.length) {
+      return json(res, 400, { error: `Not a valid address: ${malformed.join(', ')}`, code: 'bad_rcpt' });
+    }
+
+    // Refuse BEFORE storing anything. Accepting mail we have no way to deliver, then
+    // filing it in Sent, would report success for a message that never leaves.
+    const external = rcpts.filter((r) => store.userForDomain(r.split('@')[1] || '') == null);
+    if (external.length && !SMARTHOST) {
+      return json(res, 400, {
+        error: `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud or smtp://…) to send beyond the domains it hosts.`,
+        code: 'no_smarthost',
+        external,
+      });
+    }
+
+    const messageId = `<${randomUUID()}@${MESSAGE_ID_HOST}>`;
+    const message = Buffer.from(buildMessage({
+      from, to, cc,
+      subject: String(body.subject || ''),
+      text: String(body.text || ''),
+      html: body.html ? String(body.html) : undefined,
+      messageId,
+    }), 'utf8');
+
+    let out;
+    try {
+      out = await deliverOutbound({ userId, raw: message, meta: metaFrom(message), rcpts });
+    } catch (e) {
+      const reason = transportError(e.cause ?? e, SMARTHOST?.mode === 'smtp' ? { host: SMARTHOST.host, port: SMARTHOST.port } : {});
+      return json(res, 502, { ...reason, stored: true, localDelivered: e.localDelivered ?? 0 });
+    }
+    console.log(`compose: sent ${messageId} to ${rcpts.length} recipient(s)`);
+    return json(res, 200, {
+      ok: true,
+      stored: true,
+      messageId,
+      localDelivered: out.localDelivered,
+      external: out.external.length,
+      smarthost: SMARTHOST ? SMARTHOST.mode : null,
+      relayed: out.relayed,
+    });
   },
 
 });

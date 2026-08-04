@@ -21,8 +21,11 @@ import { WebhooksScreen } from "@/screens/webhooks"
 
 const KEYS: NavKey[] = ["domains", "messages", "credentials", "webhooks"]
 
+// Only the first segment picks the screen — Messages owns the rest of the path
+// (#/messages/INBOX/12 is its reading view), so deep links keep the nav highlighted
+// and don't remount the screen on every step.
 function readHash(): NavKey {
-  const h = window.location.hash.replace(/^#\/?/, "")
+  const h = window.location.hash.replace(/^#\/?/, "").split("/")[0]
   return (KEYS as string[]).includes(h) ? (h as NavKey) : "domains"
 }
 

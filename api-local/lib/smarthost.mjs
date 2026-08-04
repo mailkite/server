@@ -159,25 +159,65 @@ function relayViaSmtp(cfg, raw, rcpts, mailfrom, { timeoutMs = 30000 } = {}) {
   });
 }
 
+// Headers are checked against printable ASCII with NO newlines: a header value that
+// could contain CR/LF is a header-injection vector, and encoding it is the fix.
+const ASCII_HEADER = (s) => /^[\x20-\x7e]*$/.test(s ?? '');
+/** RFC2047 base64 — the always-valid form; no line-length games with short headers. */
+const encodeHeader = (s) => (ASCII_HEADER(s) ? (s ?? '') : `=?UTF-8?B?${Buffer.from(s, 'utf8').toString('base64')}?=`);
+/** Base64 bodies must be wrapped; 76 chars is the RFC limit. */
+const wrap76 = (b64) => b64.replace(/(.{76})/g, '$1\r\n').replace(/\r\n$/, '');
+const addrList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(',')).map((s) => s.trim()).filter(Boolean);
+
 /**
- * Compose a minimal RFC822 message. Used for mail the server itself originates
- * (sign-in links, setup verification codes) rather than mail it relays.
+ * One MIME part: 7bit when the content genuinely is, base64 otherwise.
+ * Bodies may hold tabs and newlines — unlike headers — but a line over RFC 5322's
+ * 998-character limit still has to be encoded, or strict servers will reject or fold it.
  */
-export function buildMessage({ from, to, subject, text }) {
-  const date = new Date().toUTCString();
-  // Non-ASCII subjects need encoding; base64 RFC2047 is the simple, always-valid form.
-  const subj = /^[\x20-\x7e]*$/.test(subject)
-    ? subject
-    : `=?UTF-8?B?${Buffer.from(subject, 'utf8').toString('base64')}?=`;
-  return [
+function bodyPart(contentType, content) {
+  const text = String(content ?? '');
+  const plainSafe = /^[\x20-\x7e\t\r\n]*$/.test(text) && !text.split(/\r?\n/).some((l) => l.length > 998);
+  return plainSafe
+    ? { headers: [`Content-Type: ${contentType}`, 'Content-Transfer-Encoding: 7bit'], body: text.replace(/\r?\n/g, '\r\n') }
+    : { headers: [`Content-Type: ${contentType}`, 'Content-Transfer-Encoding: base64'], body: wrap76(Buffer.from(text, 'utf8').toString('base64')) };
+}
+
+/**
+ * Compose an RFC822 message. Used for mail the server itself originates — sign-in
+ * links, setup verification codes, and anything composed in the web console —
+ * rather than mail it relays (that arrives already-formed).
+ *
+ * `bcc` is deliberately absent: blind recipients belong in the envelope the caller
+ * passes to the smarthost, never in the headers, or they stop being blind.
+ */
+export function buildMessage({ from, to, cc, subject, text, html, messageId, date }) {
+  const toList = addrList(to);
+  const ccList = addrList(cc);
+  const head = [
     `From: ${from}`,
-    `To: ${to}`,
-    `Subject: ${subj}`,
-    `Date: ${date}`,
+    `To: ${toList.join(', ')}`,
+    ...(ccList.length ? [`Cc: ${ccList.join(', ')}`] : []),
+    `Subject: ${encodeHeader(subject)}`,
+    `Date: ${(date ?? new Date()).toUTCString()}`,
+    ...(messageId ? [`Message-ID: ${messageId}`] : []),
     'MIME-Version: 1.0',
-    'Content-Type: text/plain; charset=utf-8',
+  ];
+
+  if (!html) {
+    const part = bodyPart('text/plain; charset=utf-8', text ?? '');
+    return [...head, ...part.headers, '', part.body].join('\r\n');
+  }
+  // Both representations, so a plain-text reader isn't handed markup.
+  const boundary = `=_mk_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  const plain = bodyPart('text/plain; charset=utf-8', text ?? '');
+  const rich = bodyPart('text/html; charset=utf-8', html);
+  return [
+    ...head,
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
     '',
-    text,
+    `--${boundary}`, ...plain.headers, '', plain.body,
+    `--${boundary}`, ...rich.headers, '', rich.body,
+    `--${boundary}--`,
+    '',
   ].join('\r\n');
 }
 

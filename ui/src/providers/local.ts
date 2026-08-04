@@ -15,7 +15,9 @@ import {
   type MessagePage,
   type AppPassword,
   type NewAppPassword,
+  type Compose,
   type Overview,
+  type SendResult,
   type WebhookConfig,
   type WebhookStatus,
 } from "./types"
@@ -74,6 +76,9 @@ export class LocalProvider implements MailProvider {
   }
   async rawMessage(mailbox: Mailbox, uid: number): Promise<string> {
     return (await this.call(`/api/admin/raw?mailbox=${mailbox}&uid=${uid}`)).text()
+  }
+  async send(message: Compose): Promise<SendResult> {
+    return (await this.call("/api/admin/send", { method: "POST", body: JSON.stringify(message) })).json()
   }
   async credentials(): Promise<{ apiKeys: string[]; appPasswords: string[] }> {
     return (await this.call("/api/admin/credentials")).json()
