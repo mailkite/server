@@ -20,6 +20,9 @@ import {
   type SendResult,
   type WebhookConfig,
   type WebhookStatus,
+  type Route,
+  type NewRoute,
+  type AiProvider,
 } from "./types"
 
 export type LocalConfig = { baseUrl: string; secret?: string }
@@ -130,6 +133,24 @@ export class LocalProvider implements MailProvider {
   async webhookStatus(domain?: string): Promise<WebhookStatus> {
     const q = domain ? `?domain=${encodeURIComponent(domain)}` : ""
     return (await this.call(`/api/admin/domains/webhook-status${q}`)).json()
+  }
+
+  async routes(): Promise<{ routes: Route[]; providers: AiProvider[] }> {
+    return (await this.call("/api/admin/routes")).json()
+  }
+  async createRoute(spec: NewRoute): Promise<Route> {
+    return (await this.call("/api/admin/routes", { method: "POST", body: JSON.stringify(spec) })).json()
+  }
+  async updateRoute(id: number, patch: Partial<NewRoute> & { active?: boolean }): Promise<Route> {
+    return (await this.call(`/api/admin/routes/${id}`, { method: "PATCH", body: JSON.stringify(patch) })).json()
+  }
+  async rotateRouteSecret(id: number): Promise<string> {
+    const res = await this.call(`/api/admin/routes/${id}/rotate`, { method: "POST", body: "{}" })
+    const body = (await res.json()) as { secret?: string }
+    return body.secret ?? ""
+  }
+  async deleteRoute(id: number): Promise<void> {
+    await this.call(`/api/admin/routes/${id}`, { method: "DELETE" })
   }
 
   static readonly notImplemented = NotImplemented

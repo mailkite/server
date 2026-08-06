@@ -76,4 +76,19 @@ export class CloudProvider implements MailProvider {
   async webhookStatus(): Promise<WebhookStatus> {
     throw new NotImplemented("MailKite Cloud connection")
   }
+  async routes(): Promise<never> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async createRoute(): Promise<never> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async updateRoute(): Promise<never> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async rotateRouteSecret(): Promise<string> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
+  async deleteRoute(): Promise<void> {
+    throw new NotImplemented("MailKite Cloud connection")
+  }
 }

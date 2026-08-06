@@ -16,8 +16,24 @@ backend contract — run it fully self-hosted, or point the same components at
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, and smarthost outbound (`SMARTHOST=cloud` or any SMTP relay) |
-| [`ui/`](ui/) | Web console for domains, DNS records, message log, webhooks, and credentials — magic-link sign-in, pluggable providers (local or MailKite Cloud) |
+| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), and smarthost outbound (`SMARTHOST=cloud` or any SMTP relay) |
+| [`ui/`](ui/) | Web console for domains, DNS records, message log, routes, webhooks, and credentials — magic-link sign-in, pluggable providers (local or MailKite Cloud) |
+
+### Routes — do something with the mail
+
+Past "store it and expose it over IMAP", an address can carry a rule
+([`docs/routes.md`](docs/routes.md)): POST it to a **webhook**, **forward** it somewhere, or
+hand it to an **AI agent** that replies or escalates. Matching fans out, so one message can
+do all three.
+
+Agent routes are **bring-your-own-key** — Anthropic, Gemini, OpenAI, OpenRouter, Groq,
+Mistral, Together, xAI, DeepSeek, or any OpenAI-compatible endpoint including a local
+Ollama/vLLM. Your key is encrypted at rest and only ever leaves for the provider you named;
+no dependency and no MailKite account is involved. The agent runs deliberately
+narrow — it can reply to the sender or forward to an address **you** nominated, and nothing
+else — because the mail it reads is attacker-controlled input. See
+[`docs/routes.md` §5](docs/routes.md) for the threat model and the one known gap (no
+per-route rate cap yet).
 
 ## The backend contract
 

@@ -98,6 +98,55 @@ export type WebhookStatus = {
   counts: { pending: number; delivered: number; failed: number }
 }
 
+/** What a route does with a matching message (docs/routes.md). */
+export type RouteAction = "webhook" | "forward" | "agent"
+
+/**
+ * One address-level rule. The AI key is deliberately absent: it goes in on create and is
+ * never readable back, so `hasAiKey` is all the console ever knows about it.
+ */
+export type Route = {
+  id: number
+  domain: string
+  /** Local-part pattern, same grammar as an app password's: "*", "support", "ticket+*". */
+  match_pattern: string
+  action: RouteAction
+  /** webhook: the URL. forward: the address. agent: unused. */
+  destination: string | null
+  /** webhook only — this route's own signing secret. */
+  webhook_secret: string | null
+  agent_prompt: string | null
+  agent_forward_to: string[]
+  ai_provider: string | null
+  ai_base_url: string | null
+  ai_model: string | null
+  hasAiKey: boolean
+  active: boolean
+  created_at: number
+}
+
+/** A provider the backend can call for `agent` routes, as advertised by the backend. */
+export type AiProvider = {
+  id: string
+  label: string
+  /** Absent for `custom`, which needs one supplied. */
+  baseUrl?: string
+  defaultModel: string
+}
+
+export type NewRoute = {
+  domain: string
+  matchPattern: string
+  action: RouteAction
+  destination?: string | null
+  agentPrompt?: string | null
+  agentForwardTo?: string[] | null
+  aiProvider?: string | null
+  aiApiKey?: string | null
+  aiBaseUrl?: string | null
+  aiModel?: string | null
+}
+
 export interface MailProvider {
   /** Short label for the header ("Local server", "MailKite Cloud"). */
   readonly name: string
@@ -127,6 +176,14 @@ export interface MailProvider {
   /** Empty url clears the webhook. Returns the (stable) signing secret when set. */
   setWebhook(domain: string, url: string): Promise<WebhookConfig>
   webhookStatus(domain?: string): Promise<WebhookStatus>
+  /** Routes — address-level inbound rules (docs/routes.md), with the AI providers on offer. */
+  routes(): Promise<{ routes: Route[]; providers: AiProvider[] }>
+  createRoute(spec: NewRoute): Promise<Route>
+  /** Partial edit. Domain and action are fixed at creation; omitting aiApiKey keeps the stored one. */
+  updateRoute(id: number, patch: Partial<NewRoute> & { active?: boolean }): Promise<Route>
+  /** New signing secret for a webhook route; the old one stops verifying immediately. */
+  rotateRouteSecret(id: number): Promise<string>
+  deleteRoute(id: number): Promise<void>
 }
 
 export class ProviderError extends Error {

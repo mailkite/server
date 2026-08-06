@@ -18,8 +18,9 @@ import { DomainsScreen } from "@/screens/domains"
 import { MessagesScreen } from "@/screens/messages"
 import { CredentialsScreen } from "@/screens/credentials"
 import { WebhooksScreen } from "@/screens/webhooks"
+import { RoutesScreen } from "@/screens/routes"
 
-const KEYS: NavKey[] = ["domains", "messages", "credentials", "webhooks"]
+const KEYS: NavKey[] = ["domains", "messages", "credentials", "webhooks", "routes"]
 
 // Only the first segment picks the screen — Messages owns the rest of the path
 // (#/messages/INBOX/12 is its reading view), so deep links keep the nav highlighted
@@ -108,6 +109,7 @@ export function App() {
       <ScreenBoundary key={route}>
         {route === "domains" && <DomainsScreen />}
         {route === "messages" && <MessagesScreen />}
+        {route === "routes" && <RoutesScreen />}
         {route === "credentials" && <CredentialsScreen />}
         {route === "webhooks" && <WebhooksScreen />}
       </ScreenBoundary>

@@ -1,5 +1,10 @@
 # Routes — pattern-matched inbound handling (webhook / forward / agent)
 
+**Status:** shipped in `api-local` + the web console. Deferred from this pass, in order of
+likely value: a per-route outbound cap (§5.4), route-level delivery status in the console
+(the `last_status` pill), and thread/sender context for the agent (L1/L2 in §"Scope").
+
+
 Today `api-local` has exactly one inbound dispatch primitive: a domain's `webhook_url`
 receives every message addressed to that domain. **Routes** generalize that to
 address-level pattern matching with three actions — `webhook` (today's behavior, scoped to
@@ -34,28 +39,35 @@ Node's built-in `fetch`/`crypto` only — rather than reinventing it.
 
 ## Data model
 
-New table, additive migration (`migrate()`'s existing `ALTER TABLE`-if-missing pattern):
+One new table (`CREATE TABLE IF NOT EXISTS`, so it appears on first boot after upgrade) plus
+one additive column on `deliveries`, via `migrate()`'s existing ALTER-if-missing pattern:
 
 ```sql
 CREATE TABLE IF NOT EXISTS routes (
   id            INTEGER PRIMARY KEY,
   user_id       INTEGER NOT NULL REFERENCES users(id),
-  domain        TEXT NOT NULL,              -- must be a domain this user owns (routes.domain → domains.domain)
-  match_pattern TEXT NOT NULL,               -- exact | *@domain | local+*@domain | /regex/
+  domain        TEXT NOT NULL,               -- scope; must be a domain this server hosts
+  match_pattern TEXT NOT NULL,               -- local-part glob (lib/patterns.mjs grammar)
   action        TEXT NOT NULL,               -- 'webhook' | 'forward' | 'agent'
   destination   TEXT,                        -- webhook: URL. forward: address. agent: unused.
-  webhook_secret TEXT,                       -- webhook only; own HMAC secret (see webhooks.mjs signPayload)
-  agent_prompt  TEXT,                        -- agent only; free-text instructions
-  agent_forward_to TEXT,                     -- agent only; JSON array — addresses its forward tool may use
-  ai_provider   TEXT,                        -- agent only; 'anthropic' | 'openai' | 'gemini' | 'openai-compatible'
-  ai_api_key_enc TEXT,                       -- agent only; sealed via sealSecret() (see §5.3) — never plaintext at rest
-  ai_base_url   TEXT,                        -- agent only; required for 'openai-compatible', ignored otherwise
-  ai_model      TEXT,                        -- agent only; falls back to the provider's built-in default
+  webhook_secret TEXT,                       -- webhook: this route's own signing secret
+  agent_prompt  TEXT,                        -- agent: the owner's instructions
+  agent_forward_to TEXT,                     -- agent: JSON array of extra allowed forward addresses
+  ai_provider   TEXT,                        -- agent: key into lib/ai.mjs PROVIDERS
+  ai_api_key_enc TEXT,                       -- agent: sealed via sealSecret() (§5.3) — never plaintext at rest
+  ai_base_url   TEXT,                        -- agent: required for 'custom', else overrides the default
+  ai_model      TEXT,                        -- agent: overrides the provider's default model
   active        INTEGER NOT NULL DEFAULT 1,
   created_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS routes_domain ON routes(domain);
+
+ALTER TABLE deliveries ADD COLUMN route_id INTEGER;  -- NULL = the domain-level webhook
 ```
+
+Route webhooks reuse the **existing** `deliveries` queue and its backoff/retry scanner
+rather than growing a second delivery path; `route_id` is only there to pick the right
+signing secret and to notice a route that was deleted or paused mid-flight.
 
 - **Per-route AI credentials, not per-install.** A single self-hosted server can serve
   several users (the `users` table is already multi-tenant); a global `AI_API_KEY` env var
@@ -70,23 +82,34 @@ CREATE INDEX IF NOT EXISTS routes_domain ON routes(domain);
 
 ## Matching semantics
 
-Ported directly from MailKite Cloud's `routeMatches` (already has a passing test suite to
-mirror, not just a description to reimplement from scratch):
+**Changed during implementation:** the plan was to port MailKite Cloud's `routeMatches`,
+including its `/regex/` form. But `api-local` already had
+[`lib/patterns.mjs`](../api-local/lib/patterns.mjs) — the app-password address grammar,
+written with the comment *"available to any future routing feature, so one grammar covers
+both"*. Routes reuse it verbatim instead. One grammar with one test suite beats a second
+one with a regex dialect, and it already accepts Cloud's full-address form:
 
 | Pattern | Matches |
 |---|---|
-| `support@app.com` | exact address only |
-| `*@app.com` | any address at that domain |
-| `ticket+*@app.com` | plus-addressed prefix (`ticket+1234@app.com`) |
-| `/^inv-\d+@app\.com$/` | JS-regex body between the slashes; **invalid regex matches nothing** (never throws — a typo in a pattern must not take down ingest) |
+| `support` (or `support@app.com`) | exact address only |
+| `*` (or `*@app.com`) | any address at that domain |
+| `ticket+*` | plus-addressed prefix (`ticket+1234@app.com`) |
+| `*-agent`, `support-*` | suffix / prefix globs |
 
-On ingest (`api/ingest`'s handler in `server.mjs`), after today's per-domain webhook
-dispatch: look up `routes` for the recipient's domain, keep the ones whose `match_pattern`
-matches the recipient and whose `user_id` equals the domain's owner (cross-tenant match is
-structurally impossible, but check it anyway — belt and suspenders, see MailKite Cloud's
-own test for exactly this), and run **all** matched active routes. A domain's legacy
-`webhook_url` keeps firing independently — think of it as an implicit `*@domain` webhook
-route that predates this table.
+Patterns are stored normalized to the local-part form, so `Support@App.Example` and
+`support` are one rule. `/regex/` is **not** supported — if a real need appears, it belongs
+in `patterns.mjs` for app passwords too, not in a routes-only fork of the grammar.
+
+On ingest (`POST /api/ingest` in `server.mjs`), after the per-domain webhook dispatch: look
+up `routes` for the recipient's domain, keep the ones whose `match_pattern` matches the
+recipient and whose `user_id` equals the domain's owner (cross-tenant match is structurally
+impossible, but `matchRoutes` checks it anyway), and run **all** matched active routes. A
+domain's legacy `webhook_url` keeps firing independently — think of it as an implicit `*`
+webhook route that predates this table.
+
+Route actions are dispatched **without blocking the ingest response**: the message is
+already stored, the edge gets its 2xx immediately, and a slow model call or an unreachable
+forward can never turn into an SMTP tempfail. Failures are logged per route.
 
 ## Actions
 
@@ -99,11 +122,14 @@ webhooks share one retry queue.
 
 ### `forward`
 
-Relay the message to `destination` using the **existing outbound path**
-(`smarthost.mjs` — `SMARTHOST=cloud` or any `smtp(s)://` relay; zero new deps, `node:net`/
-`node:tls` only, already shipped). No new sending code — a `forward` route is a
-programmatic version of what `POST /api/admin/send` already does, with the destination
+Relay the message to `destination` through the **existing outbound pipeline**
+(`deliverOutbound` → local delivery or `smarthost.mjs`; zero new deps). No second sending
+path — a `forward` route is what `POST /api/admin/send` already does with the destination
 pinned to the route's configured address instead of an admin-supplied one.
+
+Note this needs an outbound path to leave the building: without `SMARTHOST` set, a forward
+to an address this server doesn't host is logged and skipped, exactly like any other
+outbound mail.
 
 ### `agent` — the BYO-key LLM action
 
@@ -168,15 +194,21 @@ different from rotating any other credential. Keys are never logged; provider HT
 are surfaced to the console with the response body truncated and any string matching the
 stored key redacted before it's persisted to `last_status_message`-equivalent fields.
 
-### 5.4 Outbound is rate/volume bounded
+### 5.4 Outbound volume — **not yet bounded (known gap)**
 
-An `agent` route that both replies and is reachable by anyone who can guess or find the
-address is itself a moderate email-volume amplifier (send an email, get an email back).
-`runDue`-style backoff doesn't apply here since this is synchronous per-message, not
-queued — so the agent action gets its own **per-route** cap (e.g. N runs/hour, matching the
-shape of `auth_fails`'s existing per-key counters) to blunt a loop where two agent addresses
-reply to each other, or a single sender hammers one address. Exact numbers are a config
-default, not a hard architectural constraint — call this out for review, not baked in yet.
+An `agent` route that replies and is reachable by anyone who can guess the address is an
+email-volume amplifier: send an email, get an email back. Two agent addresses pointed at
+each other loop; one sender hammering one address runs up a model bill.
+
+**This is not implemented.** Nothing here caps how often a route may run. Mitigating factors
+today: the model call costs the operator's own key (so the bill is visible and self-limiting),
+an agent acts at most once per inbound message, and a reply always goes to the sender rather
+than fanning out. But an operator exposing an agent route publicly should assume it can be
+driven at whatever rate mail arrives.
+
+The intended fix is a per-route counter shaped like the existing `auth_fails` table (N runs
+per hour, refused past the cap and logged). Worth doing before an agent route is documented
+as something to put on a public, guessable address.
 
 ## The provider module (BYO — any LLM)
 
@@ -202,19 +234,19 @@ formats:
 | `gemini` | Google GenAI `generateContent` | Gemini |
 | `openai-compatible` | OpenAI chat-completions (parameterized by `base_url`) | OpenAI, Groq, Mistral, Together, Fireworks, **OpenRouter** (one key → ~300 models, so this alone is close to "any provider" without more code), Azure OpenAI, xAI/Grok, Perplexity, self-hosted Ollama/vLLM/LM Studio |
 
+As shipped, [`lib/ai.mjs`](../api-local/lib/ai.mjs) exports a `PROVIDERS` table (the single
+source of truth the admin API validates against *and* the console renders its dropdown
+from), `resolveProvider()` for validation, `complete()` for the call, and `parseDecision()`
+for reading the reply. Configured ids: `anthropic`, `gemini`, `openai`, `openrouter`,
+`groq`, `mistral`, `together`, `xai`, `deepseek`, and `custom` (any OpenAI-compatible base
+URL — Azure, Ollama, vLLM, LM Studio).
+
 ```js
-// api-local/lib/ai.mjs — sketch
-export async function complete({ provider, apiKey, model, baseUrl, system, userText }) {
-  switch (provider) {
-    case 'anthropic': return completeAnthropic({ apiKey, model, system, userText });
-    case 'gemini': return completeGemini({ apiKey, model, system, userText });
-    case 'openai':
-    case 'openai-compatible':
-    case 'openrouter':
-      return completeOpenAiCompatible({ apiKey, model, baseUrl: baseUrl || DEFAULTS[provider], system, userText });
-    default: throw new Error(`unknown ai_provider "${provider}"`);
-  }
-}
+await complete({
+  provider: 'openrouter',            // or 'custom' + baseUrl: 'http://localhost:11434/v1'
+  apiKey, system, userText,
+  model: null,                       // null → the provider's default
+});
 ```
 
 `complete()` is intentionally **non-streaming** — this runs in the background after ingest
@@ -239,15 +271,27 @@ creation — matches `credentials.tsx`'s existing app-password reveal-once patte
 ## API surface
 
 ```
-GET    /api/admin/routes                 list routes for the signed-in admin's domains
+GET    /api/admin/routes                 { routes: [...], providers: [...] }
 POST   /api/admin/routes                 create — { domain, matchPattern, action, destination?,
-                                            agentPrompt?, agentForwardTo?, aiProvider?, aiApiKey?, aiBaseUrl?, aiModel? }
-POST   /api/admin/routes/:id             update (same body shape, partial)
+                                            agentPrompt?, agentForwardTo?, aiProvider?, aiApiKey?,
+                                            aiBaseUrl?, aiModel? }
+PATCH  /api/admin/routes/:id             partial update (domain and action are immutable)
+POST   /api/admin/routes/:id/rotate      new signing secret (webhook routes only)
 DELETE /api/admin/routes/:id             delete
 ```
 
-`aiApiKey` is accepted on create/update, sealed immediately, never returned by `GET` (a
-`hasKey: true/false` boolean stands in for it, same as `app-passwords` reveal semantics).
+- `aiApiKey` is accepted on write, sealed immediately, and **never returned** — `hasAiKey:
+  true|false` stands in for it, mirroring app-password reveal semantics. A PATCH that omits
+  it keeps the stored key, so renaming a route never means re-pasting a secret.
+- `domain` and `action` are fixed at creation: changing either turns a route into a
+  different route, and doing that in place hides it from anyone reading the list. The API
+  returns `domain_immutable` / `action_immutable` and suggests creating a new one.
+- Validation is one function shared by create and update, so a route cannot be *edited*
+  into a shape it could not have been *created* in — which is what keeps "an agent route
+  always has a prompt and a resolvable provider" true for the unattended dispatch path.
+- The admin API is `api-local`'s own surface, not part of [`contract.md`](contract.md):
+  another backend implementing the contract is free to model routes differently or not at all.
+  The console asks `capabilities.routes` before showing the screen.
 
 ## Scope / non-goals for v1
 

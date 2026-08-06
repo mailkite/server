@@ -189,7 +189,7 @@ function bodyPart(contentType, content) {
  * `bcc` is deliberately absent: blind recipients belong in the envelope the caller
  * passes to the smarthost, never in the headers, or they stop being blind.
  */
-export function buildMessage({ from, to, cc, subject, text, html, messageId, date }) {
+export function buildMessage({ from, to, cc, subject, text, html, messageId, date, inReplyTo }) {
   const toList = addrList(to);
   const ccList = addrList(cc);
   const head = [
@@ -199,6 +199,9 @@ export function buildMessage({ from, to, cc, subject, text, html, messageId, dat
     `Subject: ${encodeHeader(subject)}`,
     `Date: ${(date ?? new Date()).toUTCString()}`,
     ...(messageId ? [`Message-ID: ${messageId}`] : []),
+    // Both headers, because clients disagree about which one threads: Apple Mail and
+    // Outlook follow In-Reply-To, Gmail walks References.
+    ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`, `References: ${inReplyTo}`] : []),
     'MIME-Version: 1.0',
   ];
 

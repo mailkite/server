@@ -36,10 +36,21 @@ export function buildPayload({ domain, rcpt, mailfrom, from, subject, uid, baseU
   });
 }
 
+/**
+ * The secret that signs one queued delivery: a route's own (isolating rotation and
+ * blast radius per route) when the row came from a route, else the domain's.
+ * Null when the config behind it was deleted mid-flight.
+ */
+function secretFor(store, row) {
+  if (row.route_id == null) return store.webhook(row.domain)?.secret ?? null;
+  const route = store.route(row.route_id);
+  return route && route.active ? route.webhook_secret : null;
+}
+
 /** POST one queued delivery. Returns {ok, error}. Never throws. */
 export async function attempt(store, row, { fetchImpl = fetch } = {}) {
-  const hook = store.webhook(row.domain);
-  if (!hook) return { ok: false, error: 'webhook removed for domain' };
+  const secret = secretFor(store, row);
+  if (!secret) return { ok: false, error: row.route_id == null ? 'webhook removed for domain' : 'route removed or disabled' };
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), TIMEOUT_MS);
   try {
@@ -47,7 +58,7 @@ export async function attempt(store, row, { fetchImpl = fetch } = {}) {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
-        'x-mailkite-signature': signPayload(hook.secret, row.payload),
+        'x-mailkite-signature': signPayload(secret, row.payload),
         'x-mailkite-event': 'inbound',
         'user-agent': 'MailKite-Server/1.0',
       },

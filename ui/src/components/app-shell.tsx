@@ -3,18 +3,19 @@
 // Sidebar: brand, nav (capability-gated), theme toggle + disconnect.
 
 import { useState, type ReactNode } from "react"
-import { Globe, Inbox, KeyRound, LogOut, Menu, Moon, Sun, Webhook, X, ArrowUpRight } from "lucide-react"
+import { Globe, Inbox, KeyRound, LogOut, Menu, Moon, Split, Sun, Webhook, X, ArrowUpRight } from "lucide-react"
 import { Logo } from "@/components/logo"
 import { Button } from "@/components/ui/button"
 import { useTheme } from "@/lib/theme"
 import { useConnection } from "@/providers/context"
 import { cn } from "@/lib/utils"
 
-export type NavKey = "domains" | "messages" | "credentials" | "webhooks"
+export type NavKey = "domains" | "messages" | "credentials" | "webhooks" | "routes"
 
 const NAV: { key: NavKey; label: string; icon: typeof Globe }[] = [
   { key: "domains", label: "Domains", icon: Globe },
   { key: "messages", label: "Messages", icon: Inbox },
+  { key: "routes", label: "Routes", icon: Split },
   { key: "credentials", label: "Credentials", icon: KeyRound },
   { key: "webhooks", label: "Webhooks", icon: Webhook },
 ]

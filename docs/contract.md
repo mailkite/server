@@ -41,6 +41,11 @@ Called by `mta/plugins/mailkite_ingest.js` on Haraka's queue hook.
   - `x-mailkite-mailfrom`: envelope MAIL FROM.
   - Optional edge verdicts: `x-mailkite-spf`, `x-mailkite-dkim`, `x-mailkite-dmarc`
     (pass/fail/none…), `x-mailkite-spam` (numeric score), `x-mailkite-spam-verdict`.
+- **Post-acceptance handling is the backend's business.** What a backend *does* with an
+  accepted message — store it, POST it to a webhook, evaluate per-address routes
+  ([`routes.md`](routes.md)) — is deliberately outside this contract, and must never change
+  the ingest response. A backend that runs an AI agent on the message still answers 2xx as
+  soon as the message is durably stored; the edge must not wait on it.
 - **Responses:** any **2xx** = accepted (the edge tells the sender 250). Any non-2xx or
   network error = the edge tempfails (DENYSOFT) and the sender retries — so a backend
   outage delays mail, never loses it. Do **not** return 4xx for per-recipient problems;

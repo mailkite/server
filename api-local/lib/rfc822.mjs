@@ -34,6 +34,51 @@ export function firstAddress(value) {
   return bare ? bare[1] : '';
 }
 
+/**
+ * Best-effort plain-text body, for the one consumer that has to read mail rather than
+ * just file it: an `agent` route handing the message to a model (docs/routes.md).
+ *
+ * Full MIME parsing stays out of scope (no dependencies, and IMAP clients parse the raw
+ * themselves). This walks multipart bodies for the first text/plain part, decodes the two
+ * transfer encodings that actually occur, and otherwise returns the body as-is. A model
+ * tolerates imperfect text; what matters is never throwing on malformed mail.
+ */
+export function textBody(raw) {
+  const text = raw.toString('latin1');
+  const split = text.search(/\r?\n\r?\n/);
+  const head = split === -1 ? text : text.slice(0, split);
+  const body = split === -1 ? '' : text.slice(split).replace(/^\r?\n\r?\n/, '');
+  const h = headers(Buffer.from(head, 'latin1'));
+  const ctype = h['content-type'] || '';
+
+  const decode = (part, encoding, charset) => {
+    const enc = String(encoding || '').toLowerCase().trim();
+    let buf;
+    if (enc === 'base64') buf = Buffer.from(part.replace(/\s+/g, ''), 'base64');
+    else if (enc === 'quoted-printable') {
+      buf = Buffer.from(part.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g,
+        (_m, x) => String.fromCharCode(parseInt(x, 16))), 'latin1');
+    } else buf = Buffer.from(part, 'latin1');
+    try { return new TextDecoder(charset || 'utf-8').decode(buf); } catch { return buf.toString('utf8'); }
+  };
+  const charsetOf = (ct) => (ct.match(/charset="?([^";\s]+)"?/i) || [])[1];
+
+  const boundary = (ctype.match(/boundary="?([^";]+)"?/i) || [])[1];
+  if (/^multipart\//i.test(ctype) && boundary) {
+    for (const part of body.split(`--${boundary}`)) {
+      const at = part.search(/\r?\n\r?\n/);
+      if (at === -1) continue;
+      const ph = headers(Buffer.from(part.slice(0, at), 'latin1'));
+      const pct = ph['content-type'] || 'text/plain';
+      if (!/^text\/plain/i.test(pct)) continue;
+      return decode(part.slice(at).replace(/^\r?\n\r?\n/, ''),
+        ph['content-transfer-encoding'], charsetOf(pct)).trim();
+    }
+    return ''; // html-only mail: nothing plain to hand over
+  }
+  return decode(body, h['content-transfer-encoding'], charsetOf(ctype)).trim();
+}
+
 /** Decode a (single) RFC2047 encoded-word subject, best effort. */
 export function subject(value) {
   if (!value) return '';

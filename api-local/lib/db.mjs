@@ -18,6 +18,24 @@ const SCHEMA = `
     webhook_url TEXT,                    -- inbound dispatch target (null = no webhook)
     webhook_secret TEXT                  -- signs the payload; generated with the URL
   );
+  CREATE TABLE IF NOT EXISTS routes (      -- docs/routes.md — address-level inbound handling
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    domain TEXT NOT NULL,                -- scope; must be a domain this server hosts
+    match_pattern TEXT NOT NULL,         -- local-part glob (lib/patterns.mjs grammar)
+    action TEXT NOT NULL,                -- 'webhook' | 'forward' | 'agent'
+    destination TEXT,                    -- webhook: URL. forward: address. agent: unused.
+    webhook_secret TEXT,                 -- webhook: signs this route's payloads
+    agent_prompt TEXT,                   -- agent: the owner's instructions
+    agent_forward_to TEXT,               -- agent: JSON array of extra allowed forward addresses
+    ai_provider TEXT,                    -- agent: key into lib/ai.mjs PROVIDERS
+    ai_api_key_enc TEXT,                 -- agent: sealed (sealSecret) — never plaintext at rest
+    ai_base_url TEXT,                    -- agent: required for 'custom', else overrides the default
+    ai_model TEXT,                       -- agent: overrides the provider's default model
+    active INTEGER NOT NULL DEFAULT 1,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS routes_domain ON routes(domain);
   CREATE TABLE IF NOT EXISTS deliveries (  -- webhook attempts, retried by the scanner
     id INTEGER PRIMARY KEY,
     domain TEXT NOT NULL,
@@ -149,6 +167,11 @@ export class Store {
     const domainCols = cols('domains');
     for (const [name, ddl] of [['webhook_url', 'TEXT'], ['webhook_secret', 'TEXT']]) {
       if (!domainCols.includes(name)) this.db.exec(`ALTER TABLE domains ADD COLUMN ${name} ${ddl}`);
+    }
+    // Route-owned webhook deliveries share the domain queue; the column tells them apart
+    // (NULL = the domain-level webhook that predates routes).
+    if (!cols('deliveries').includes('route_id')) {
+      this.db.exec('ALTER TABLE deliveries ADD COLUMN route_id INTEGER');
     }
     this.migrateAppPasswords();
   }
@@ -345,12 +368,113 @@ export class Store {
   }
   anyWebhook() { return this.db.prepare('SELECT COUNT(*) c FROM domains WHERE webhook_url IS NOT NULL').get().c > 0; }
 
-  queueDelivery(domain, url, payload) {
+  queueDelivery(domain, url, payload, routeId = null) {
     const now = Date.now();
     const r = this.db.prepare(
-      `INSERT INTO deliveries(domain, url, payload, status, attempts, next_attempt, created, updated)
-       VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)`).run(domain, url, payload, now, now, now);
+      `INSERT INTO deliveries(domain, url, payload, status, attempts, next_attempt, created, updated, route_id)
+       VALUES (?, ?, ?, 'pending', 0, ?, ?, ?, ?)`).run(domain, url, payload, now, now, now, routeId);
     return Number(r.lastInsertRowid);
+  }
+
+  // --- routes (docs/routes.md) ---------------------------------------------------
+  // Address-level inbound handling. A domain's own webhook_url keeps working alongside
+  // these — think of it as an implicit `*` webhook route that predates the table.
+
+  /**
+   * Create a route. `webhook` mints its own signing secret so a compromised receiver
+   * can be re-keyed without touching the domain's other routes; `agent` seals its AI
+   * key the same way app-password secrets are sealed (see sealSecret).
+   */
+  addRoute({ userId, domain, matchPattern, action, destination = null, agentPrompt = null,
+             agentForwardTo = null, aiProvider = null, aiApiKey = null, aiBaseUrl = null, aiModel = null }) {
+    const r = this.db.prepare(
+      `INSERT INTO routes(user_id, domain, match_pattern, action, destination, webhook_secret,
+                          agent_prompt, agent_forward_to, ai_provider, ai_api_key_enc, ai_base_url,
+                          ai_model, active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)`)
+      .run(userId, String(domain).toLowerCase(), String(matchPattern).toLowerCase(), action,
+           destination, action === 'webhook' ? 'whsec_' + randomBytes(24).toString('base64url') : null,
+           agentPrompt, agentForwardTo ? JSON.stringify(agentForwardTo) : null,
+           aiProvider, aiApiKey ? sealSecret(aiApiKey) : null, aiBaseUrl, aiModel, Date.now());
+    return this.route(Number(r.lastInsertRowid));
+  }
+
+  /** Public shape: everything except the sealed AI key, which is never readable back. */
+  #publicRoute(row) {
+    if (!row) return null;
+    const { ai_api_key_enc, webhook_secret, ...rest } = row;
+    return {
+      ...rest,
+      active: !!row.active,
+      agent_forward_to: row.agent_forward_to ? JSON.parse(row.agent_forward_to) : [],
+      webhook_secret: webhook_secret || null,
+      hasAiKey: !!ai_api_key_enc,
+    };
+  }
+
+  route(id) {
+    return this.#publicRoute(this.db.prepare('SELECT * FROM routes WHERE id = ?').get(Number(id)));
+  }
+
+  routes(userId = null) {
+    const sql = `SELECT * FROM routes ${userId == null ? '' : 'WHERE user_id = ?'} ORDER BY id DESC`;
+    const rows = userId == null ? this.db.prepare(sql).all() : this.db.prepare(sql).all(userId);
+    return rows.map((r) => this.#publicRoute(r));
+  }
+
+  /** Active routes for one domain, in creation order — the dispatch path's input. */
+  activeRoutesForDomain(domain) {
+    return this.db.prepare(
+      'SELECT * FROM routes WHERE domain = ? AND active = 1 ORDER BY id')
+      .all(String(domain).toLowerCase())
+      .map((r) => this.#publicRoute(r));
+  }
+
+  /**
+   * The route's decrypted AI key, for the agent runner only. Never returned by the
+   * admin API. Null when unset, or when HMAC_SECRET rotated since it was stored — the
+   * operator re-enters the key, exactly like a rotated app-password secret.
+   */
+  routeAiKey(id) {
+    const r = this.db.prepare('SELECT ai_api_key_enc FROM routes WHERE id = ?').get(Number(id));
+    return r ? openSecret(r.ai_api_key_enc) : null;
+  }
+
+  /** Partial update. Only the named fields change; a new AI key is resealed. */
+  updateRoute(id, fields = {}) {
+    const row = this.db.prepare('SELECT * FROM routes WHERE id = ?').get(Number(id));
+    if (!row) return null;
+    const map = {
+      matchPattern: ['match_pattern', (v) => String(v).toLowerCase()],
+      destination: ['destination', (v) => v],
+      agentPrompt: ['agent_prompt', (v) => v],
+      agentForwardTo: ['agent_forward_to', (v) => (v ? JSON.stringify(v) : null)],
+      aiProvider: ['ai_provider', (v) => v],
+      aiApiKey: ['ai_api_key_enc', (v) => (v ? sealSecret(v) : null)],
+      aiBaseUrl: ['ai_base_url', (v) => v],
+      aiModel: ['ai_model', (v) => v],
+      active: ['active', (v) => (v ? 1 : 0)],
+    };
+    const sets = [], args = [];
+    for (const [key, [col, coerce]] of Object.entries(map)) {
+      if (fields[key] === undefined) continue;
+      sets.push(`${col} = ?`);
+      args.push(coerce(fields[key]));
+    }
+    if (sets.length) this.db.prepare(`UPDATE routes SET ${sets.join(', ')} WHERE id = ?`).run(...args, Number(id));
+    return this.route(id);
+  }
+
+  deleteRoute(id) {
+    return this.db.prepare('DELETE FROM routes WHERE id = ?').run(Number(id)).changes > 0;
+  }
+
+  /** Rotate a webhook route's signing secret; the old one stops verifying immediately. */
+  rotateRouteSecret(id) {
+    const secret = 'whsec_' + randomBytes(24).toString('base64url');
+    const r = this.db.prepare("UPDATE routes SET webhook_secret = ? WHERE id = ? AND action = 'webhook'")
+      .run(secret, Number(id));
+    return r.changes ? secret : null;
   }
   dueDeliveries(limit = 20, now = Date.now()) {
     return this.db.prepare(

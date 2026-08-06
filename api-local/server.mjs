@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import { Store } from './lib/db.mjs';
-import { headers, firstAddress, subject } from './lib/rfc822.mjs';
+import { headers, firstAddress, subject, textBody } from './lib/rfc822.mjs';
 import { buildMessage, parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
 import {
   authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
@@ -23,6 +23,8 @@ import {
 } from './lib/auth-setup.mjs';
 import { matchesAddress, normalizePattern, splitAddress } from './lib/patterns.mjs';
 import { buildPayload, runDue, startScanner } from './lib/webhooks.mjs';
+import { dispatchRoutes, matchRoutes } from './lib/routing.mjs';
+import { PROVIDERS, PROVIDER_IDS, resolveProvider } from './lib/ai.mjs';
 import { transportError } from './lib/errors.mjs';
 
 const SECRET = process.env.HMAC_SECRET || '';
@@ -219,6 +221,88 @@ async function deliverOutbound({ userId, raw, meta, rcpts }) {
   return { localDelivered, external, relayed };
 }
 
+/**
+ * Validate a route create/update body. Returns an error object to send, or null.
+ *
+ * One validator for both verbs so a route can never be edited into a shape it could not
+ * have been created in — the cheapest way to keep "an agent route always has a prompt and
+ * a resolvable provider" true for the dispatch path, which runs unattended.
+ */
+function validateRoute(body, { creating = false, existing = null } = {}) {
+  const action = body.action ?? existing?.action;
+  if (creating) {
+    const domain = String(body.domain || '').toLowerCase();
+    if (!domain || !store.domains().includes(domain)) {
+      return { error: `This server doesn't host ${domain || '(no domain)'} — add the domain first.`, code: 'bad_domain' };
+    }
+    if (!normalizePattern(body.matchPattern, domain)) {
+      return { error: `Not a usable address pattern for ${domain}: ${body.matchPattern ?? '(empty)'}`, code: 'bad_pattern' };
+    }
+    if (!['webhook', 'forward', 'agent'].includes(action)) {
+      return { error: 'action must be one of: webhook, forward, agent', code: 'bad_action' };
+    }
+  }
+  const dest = body.destination !== undefined ? body.destination : existing?.destination;
+  if (action === 'webhook' && (creating || body.destination !== undefined)) {
+    let u;
+    try { u = new URL(dest); } catch { return { error: 'Enter a valid webhook URL.', code: 'bad_url' }; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+      return { error: 'Webhook URL must be http(s).', code: 'bad_url' };
+    }
+  }
+  if (action === 'forward' && (creating || body.destination !== undefined)) {
+    if (!EMAIL_RE.test(String(dest || ''))) {
+      return { error: 'Enter the address to forward to.', code: 'bad_destination' };
+    }
+  }
+  if (action === 'agent') {
+    const prompt = body.agentPrompt !== undefined ? body.agentPrompt : existing?.agent_prompt;
+    if (!String(prompt || '').trim()) {
+      return { error: 'An agent route needs instructions telling it what to do.', code: 'bad_prompt' };
+    }
+    // Resolve now so a route that stores cleanly cannot fail differently at run time.
+    const spec = resolveProvider({
+      provider: body.aiProvider !== undefined ? body.aiProvider : existing?.ai_provider,
+      baseUrl: body.aiBaseUrl !== undefined ? body.aiBaseUrl : existing?.ai_base_url,
+      model: body.aiModel !== undefined ? body.aiModel : existing?.ai_model,
+    });
+    if (spec.error) return { error: spec.error, code: 'bad_provider' };
+    // A key is required to create one, but an edit that doesn't mention it keeps the stored key.
+    if (creating && !String(body.aiApiKey || '').trim()) {
+      return { error: `Add your ${PROVIDERS[spec.provider].label} API key — it stays on this server, encrypted.`, code: 'no_api_key' };
+    }
+    const forwardTo = body.agentForwardTo !== undefined ? body.agentForwardTo : existing?.agent_forward_to;
+    if (forwardTo != null && !Array.isArray(forwardTo)) {
+      return { error: 'agentForwardTo must be a list of addresses.', code: 'bad_forward_to' };
+    }
+    for (const a of forwardTo || []) {
+      if (!EMAIL_RE.test(String(a))) return { error: `Not a valid forward address: ${a}`, code: 'bad_forward_to' };
+    }
+  }
+  return null;
+}
+
+/**
+ * The outbound path route actions use (docs/routes.md). Two shapes, one pipeline:
+ * `raw` relays an existing message untouched (a `forward` route), otherwise the message
+ * is composed here (an agent's reply or forward).
+ *
+ * The From address is always supplied by the caller from the route's own configuration —
+ * never from anything a sender wrote — so no inbound content can pick who this sends as.
+ */
+async function sendForRoute({ from, to, subject: subj, text, inReplyTo, raw }) {
+  const fromDomain = (String(from).split('@')[1] || '').toLowerCase();
+  const userId = store.userForDomain(fromDomain);
+  if (userId == null) throw new Error(`cannot send as ${from} — this server doesn't host ${fromDomain}`);
+  const message = raw ?? Buffer.from(buildMessage({
+    from, to, subject: subj ?? '', text: text ?? '',
+    messageId: `<${randomUUID()}@${MESSAGE_ID_HOST}>`,
+    inReplyTo,
+  }), 'utf8');
+  const meta = metaFrom(message, { from_addr: from });
+  return deliverOutbound({ userId, raw: message, meta, rcpts: [to] });
+}
+
 // The A record for a mail host must point at this server, so tell the web console what
 // this server's public address actually is instead of making the admin look it up:
 // resolve the hostname they're browsing (already public by definition), and fall back to
@@ -282,6 +366,7 @@ const routes = {
     let stored = 0;
     let deduped = 0;
     let queued = 0;
+    const dispatched = [];
     // Idempotent by (recipient, mailbox, content hash): a multi-backend edge tempfailing
     // on a sibling backend makes the sender retry — the re-delivery must not duplicate.
     const blobSha = Store.hashRaw(raw);
@@ -301,19 +386,47 @@ const routes = {
       }));
       stored++;
       // Store first, then queue: the message is safe even if dispatch never succeeds.
+      const payload = {
+        domain, rcpt, uid,
+        mailfrom: req.headers['x-mailkite-mailfrom'] || '',
+        from: meta0.from_addr, subject: meta0.subject,
+        baseUrl: `${scheme}://${req.headers.host || ''}`,
+      };
       const hook = store.webhook(domain);
       if (hook) {
-        store.queueDelivery(domain, hook.url, buildPayload({
-          domain, rcpt, uid,
-          mailfrom: req.headers['x-mailkite-mailfrom'] || '',
-          from: meta0.from_addr, subject: meta0.subject,
-          baseUrl: `${scheme}://${req.headers.host || ''}`,
-        }));
+        store.queueDelivery(domain, hook.url, buildPayload(payload));
         queued++;
+      }
+      // Routes fan out on top of the domain webhook (docs/routes.md): every matching
+      // active route runs, and none of them can fail the ingest — the mail is stored.
+      const matched = matchRoutes(store, rcpt, domain, userId);
+      if (matched.length) {
+        queued += matched.filter((r) => r.action === 'webhook' && r.destination).length;
+        dispatched.push(dispatchRoutes(store, matched, {
+          payload,
+          raw,
+          send: sendForRoute,
+          email: {
+            from: meta0.from_addr, to: rcpt, subject: meta0.subject,
+            body: textBody(raw), messageId: headers(raw)['message-id'] || null,
+          },
+        }));
       }
     }
     // Fire the queue now (don't await — the edge's 2xx shouldn't wait on a receiver).
     if (queued) runDue(store).catch((e) => console.error('webhook dispatch:', e.message));
+    // Same for routes: an agent call takes seconds, and the SMTP transaction must not
+    // wait on a model. Failures are logged, never surfaced to the sender.
+    if (dispatched.length) {
+      Promise.all(dispatched)
+        .then((all) => {
+          for (const r of all.flat()) {
+            if (r.ok === false) console.warn(`route ${r.id} (${r.action}): ${r.error}`);
+            else if (r.action && r.action !== 'none') console.log(`route ${r.id}: ${r.action}${r.to ? ` → ${r.to}` : ''}`);
+          }
+        })
+        .catch((e) => console.error('route dispatch:', e.message));
+    }
     return json(res, 200, { ok: true, stored, deduped, webhooksQueued: queued });
   },
 
@@ -729,7 +842,7 @@ Object.assign(routes, {
         outboundLocal: true,
         outboundInternet: !!SMARTHOST,   // true once a smarthost is configured
         webhooks: true,                  // configurable per domain (may be unset)
-        routes: false,
+        routes: true,                    // docs/routes.md — address-level webhook/forward/agent
       },
     });
   },
@@ -777,6 +890,37 @@ Object.assign(routes, {
     if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
     const q = new URL(req.url, 'http://x').searchParams;
     return json(res, 200, store.deliveryStatus(q.get('domain'), Math.min(Number(q.get('limit')) || 20, 100)));
+  },
+
+  // Routes (docs/routes.md). One address pattern → one action. The AI key on an `agent`
+  // route is write-only: it is sealed on the way in and never returned, so the console
+  // shows "configured" rather than a value it could leak.
+  'GET /api/admin/routes': async (req, res) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    return json(res, 200, {
+      routes: store.routes(store.defaultUser()),
+      providers: PROVIDER_IDS.map((id) => ({ id, ...PROVIDERS[id] })),
+    });
+  },
+  'POST /api/admin/routes': async (req, res, raw) => {
+    if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+    let body;
+    try { body = JSON.parse(raw.toString() || '{}'); } catch { return json(res, 400, { error: 'Malformed request.', code: 'bad_json' }); }
+    const bad = validateRoute(body, { creating: true });
+    if (bad) return json(res, 400, bad);
+    return json(res, 200, store.addRoute({
+      userId: store.defaultUser(),
+      domain: String(body.domain).toLowerCase(),
+      matchPattern: normalizePattern(body.matchPattern, body.domain),
+      action: body.action,
+      destination: body.destination ?? null,
+      agentPrompt: body.agentPrompt ?? null,
+      agentForwardTo: body.agentForwardTo ?? null,
+      aiProvider: body.aiProvider ?? null,
+      aiApiKey: body.aiApiKey ?? null,
+      aiBaseUrl: body.aiBaseUrl ?? null,
+      aiModel: body.aiModel ?? null,
+    }));
   },
 
   'GET /api/admin/credentials': async (req, res) => {
@@ -1060,6 +1204,51 @@ const PARAM_ROUTES = [
       return updated
         ? json(res, 200, updated)
         : json(res, 404, { error: 'no such app password', code: 'not_found' });
+    },
+  },
+  {
+    rx: /^\/api\/admin\/routes\/(\d+)$/,
+    handler: async (req, res, raw, match) => {
+      if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+      const id = Number(match[1]);
+      const existing = store.route(id);
+      if (!existing) return json(res, 404, { error: 'no such route', code: 'not_found' });
+      if (req.method === 'DELETE') return json(res, 200, { ok: store.deleteRoute(id) });
+      if (req.method !== 'PATCH') return json(res, 405, { error: 'use PATCH or DELETE', code: 'bad_method' });
+      let body;
+      try { body = JSON.parse(raw.toString() || '{}'); } catch { return json(res, 400, { error: 'Malformed request.', code: 'bad_json' }); }
+      // The domain and action are fixed at creation: changing either turns a route into a
+      // different route, and doing that in place hides it from anyone reading the list.
+      for (const immutable of ['domain', 'action']) {
+        if (body[immutable] !== undefined && String(body[immutable]).toLowerCase() !== String(existing[immutable]).toLowerCase()) {
+          return json(res, 400, {
+            error: `A route keeps the ${immutable} it was created with (${existing[immutable]}). Create a new route instead.`,
+            code: `${immutable}_immutable`,
+          });
+        }
+      }
+      if (body.matchPattern !== undefined && !normalizePattern(body.matchPattern, existing.domain)) {
+        return json(res, 400, { error: `Not a usable address pattern for ${existing.domain}: ${body.matchPattern}`, code: 'bad_pattern' });
+      }
+      const bad = validateRoute(body, { existing });
+      if (bad) return json(res, 400, bad);
+      return json(res, 200, store.updateRoute(id, {
+        ...body,
+        ...(body.matchPattern !== undefined
+          ? { matchPattern: normalizePattern(body.matchPattern, existing.domain) }
+          : {}),
+      }));
+    },
+  },
+  {
+    rx: /^\/api\/admin\/routes\/(\d+)\/rotate$/,
+    handler: async (req, res, _raw, match) => {
+      if (req.method !== 'POST') return json(res, 405, { error: 'use POST', code: 'bad_method' });
+      if (!adminAuthed(req)) return json(res, 401, { error: 'unauthorized' });
+      const secret = store.rotateRouteSecret(Number(match[1]));
+      return secret
+        ? json(res, 200, { secret })
+        : json(res, 404, { error: 'no such webhook route', code: 'not_found' });
     },
   },
   {
