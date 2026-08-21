@@ -16,7 +16,7 @@ backend contract — run it fully self-hosted, or point the same components at
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), and smarthost outbound (`SMARTHOST=cloud` or any SMTP relay) |
+| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), smarthost outbound (`SMARTHOST=cloud` or any SMTP relay), and the [developer API](docs/v1.md) — the same `POST /v1/send` + `GET /api/messages` JSON surface as MailKite Cloud, so SDKs point at your server instead of `api.mailkite.dev` |
 | [`ui/`](ui/) | Web console for domains, DNS records, message log, routes, webhooks, and credentials — magic-link sign-in, pluggable providers (local or MailKite Cloud) |
 
 ### Routes — do something with the mail

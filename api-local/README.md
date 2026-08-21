@@ -8,6 +8,7 @@ it is the "self-hosted" half of the provider toggle, MailKite Cloud being the ot
 | | |
 |---|---|
 | Implements | `/api/ingest`, `/api/mx/accepted-domains`, `/api/smtp/auth`, `/api/relay`, `/api/imap/{auth,status,list,flags,raw}` |
+| Developer API | `/v1/send`, `/v1/me`, `/api/messages`, `/api/messages/:id` — the same JSON surface as `api.mailkite.dev` ([`docs/v1.md`](../docs/v1.md)) |
 | Storage | `DATA_DIR/mail.db` (WAL) + `DATA_DIR/blobs/<sha256>` raw messages |
 | Requires | Node ≥ 22.5 (`node:sqlite`) |
 | Listens | `127.0.0.1:8787` by default — keep it loopback/private; the edges are its only intended callers |
@@ -20,6 +21,24 @@ laptop. That's the whole support matrix by design — the zero-dependency `node:
 of scope by decision**: serverless runtimes can't hold a SQLite file or a raw-TCP edge,
 and the hosted backend for that deployment style already exists — it's
 [MailKite Cloud](https://mailkite.dev), speaking the same contract.
+
+## Developer API — point your SDK here
+
+`api-local` speaks the same JSON send/receive surface as MailKite Cloud, so the SDKs and
+code written against `api.mailkite.dev` run unchanged — point the client's `baseUrl` at
+this server. See [`docs/v1.md`](../docs/v1.md) for the full surface.
+
+```sh
+curl -X POST localhost:8787/v1/send \
+  -H "authorization: Bearer mk_local_…" -H 'content-type: application/json' \
+  -d '{"from":"hello@myapp.ai","to":"ada@example.com","subject":"hi","text":"hello"}'
+# → {"id":"msg_…","status":"sent"}
+
+curl -H "authorization: Bearer mk_local_…" localhost:8787/api/messages   # account-wide, newest first
+```
+
+"Send" means what it always meant here — local delivery plus your `SMARTHOST`. Hosted-only
+fields (`templateId`, `scheduledAt`, `attachments`) are refused with `400 unsupported`.
 
 ## Run
 

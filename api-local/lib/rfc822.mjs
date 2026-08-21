@@ -79,6 +79,49 @@ export function textBody(raw) {
   return decode(body, h['content-transfer-encoding'], charsetOf(ctype)).trim();
 }
 
+/**
+ * The text/html twin of textBody(), for the message-detail endpoint (docs/v1.md): walk
+ * multipart bodies for the first text/html part, or a bare text/html body, and decode
+ * the two transfer encodings that actually occur. Returns null when there is no HTML
+ * part — the caller falls back to the plain text.
+ */
+export function htmlBody(raw) {
+  const text = raw.toString('latin1');
+  const split = text.search(/\r?\n\r?\n/);
+  const body = split === -1 ? '' : text.slice(split).replace(/^\r?\n\r?\n/, '');
+  const h = headers(raw);
+  const ctype = h['content-type'] || '';
+
+  const decode = (part, encoding, charset) => {
+    const enc = String(encoding || '').toLowerCase().trim();
+    let buf;
+    if (enc === 'base64') buf = Buffer.from(part.replace(/\s+/g, ''), 'base64');
+    else if (enc === 'quoted-printable') {
+      buf = Buffer.from(part.replace(/=\r?\n/g, '').replace(/=([0-9A-Fa-f]{2})/g,
+        (_m, x) => String.fromCharCode(parseInt(x, 16))), 'latin1');
+    } else buf = Buffer.from(part, 'latin1');
+    try { return new TextDecoder(charset || 'utf-8').decode(buf); } catch { return buf.toString('utf8'); }
+  };
+  const charsetOf = (ct) => (ct.match(/charset="?([^";\s]+)"?/i) || [])[1];
+
+  const boundary = (ctype.match(/boundary="?([^";]+)"?/i) || [])[1];
+  if (/^multipart\//i.test(ctype) && boundary) {
+    for (const part of body.split(`--${boundary}`)) {
+      const at = part.search(/\r?\n\r?\n/);
+      if (at === -1) continue;
+      const ph = headers(Buffer.from(part.slice(0, at), 'latin1'));
+      const pct = ph['content-type'] || 'text/plain';
+      if (!/^text\/html/i.test(pct)) continue;
+      return decode(part.slice(at).replace(/^\r?\n\r?\n/, ''),
+        ph['content-transfer-encoding'], charsetOf(pct)).trim();
+    }
+    return null; // multipart with no HTML part
+  }
+  return /^text\/html/i.test(ctype)
+    ? decode(body, h['content-transfer-encoding'], charsetOf(ctype)).trim()
+    : null;
+}
+
 /** Decode a (single) RFC2047 encoded-word subject, best effort. */
 export function subject(value) {
   if (!value) return '';

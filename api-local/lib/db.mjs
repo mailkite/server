@@ -173,6 +173,16 @@ export class Store {
     if (!cols('deliveries').includes('route_id')) {
       this.db.exec('ALTER TABLE deliveries ADD COLUMN route_id INTEGER');
     }
+    // Developer-API message ids (docs/v1.md): a stable `msg_…` handle returned by
+    // POST /v1/send and GET /api/messages, independent of the per-mailbox uid. Minted
+    // for every stored message; rows that predate the column are backfilled on boot.
+    if (!cols('messages').includes('public_id')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN public_id TEXT');
+      for (const r of this.db.prepare('SELECT id FROM messages WHERE public_id IS NULL').all()) {
+        this.db.prepare('UPDATE messages SET public_id = ? WHERE id = ?').run(Store.newId(), r.id);
+      }
+      this.db.exec('CREATE UNIQUE INDEX IF NOT EXISTS messages_public_id ON messages(public_id)');
+    }
     this.migrateAppPasswords();
   }
 
@@ -672,6 +682,9 @@ export class Store {
   /** Content hash of a raw message — the blobs/ filename putBlob() will use. */
   static hashRaw(raw) { return createHash('sha256').update(raw).digest('hex'); }
 
+  /** A public, opaque resource id (`msg_…`) — the handle the developer API surfaces. */
+  static newId(prefix = 'msg') { return `${prefix}_${randomBytes(12).toString('base64url')}`; }
+
   /** Ingest idempotency: has this exact message already been stored for this recipient? */
   messageExists(userId, mailbox, blob, rcpt) {
     return !!this.db.prepare(
@@ -685,16 +698,17 @@ export class Store {
     this.db.prepare('UPDATE mailboxes SET uidnext = uidnext + 1 WHERE user_id = ? AND mailbox = ?')
       .run(userId, mailbox);
     const blob = this.putBlob(raw);
+    const publicId = meta.public_id || Store.newId();
     this.db.prepare(`INSERT INTO messages
         (user_id, mailbox, uid, flags, internaldate, from_addr, to_addr, subject,
-         mailfrom, rcpt, spf, dkim, dmarc, spam, spam_verdict, size, blob)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+         mailfrom, rcpt, spf, dkim, dmarc, spam, spam_verdict, size, blob, public_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(userId, mailbox, uid, meta.flags || '', new Date().toISOString(),
         meta.from_addr || null, meta.to_addr || null, meta.subject || null,
         meta.mailfrom || null, meta.rcpt || null,
         meta.spf || null, meta.dkim || null, meta.dmarc || null,
-        meta.spam || null, meta.spam_verdict || null, raw.length, blob);
-    return uid;
+        meta.spam || null, meta.spam_verdict || null, raw.length, blob, publicId);
+    return { uid, publicId };
   }
 
   // Single-tenant convenience for the admin API / UI: one implicit account.
@@ -721,6 +735,32 @@ export class Store {
              FROM messages WHERE user_id = ? AND mailbox = ?
              ORDER BY uid DESC LIMIT ?`).all(userId, mailbox, limit);
     return rows;
+  }
+
+  /**
+   * Developer API (docs/v1.md): one account-wide view across INBOX + Sent, newest
+   * first, shaped like api.mailkite.dev's GET /api/messages. `before` is a received_at
+   * epoch-ms cursor — echo the last row's received_at to page, exactly as the cloud SDKs
+   * do. `search` is a case-insensitive substring over sender, recipient, and subject.
+   */
+  listAccount(userId, { limit = 100, before = null, search = null } = {}) {
+    const conds = ['user_id = ?'];
+    const params = [userId];
+    if (before) { conds.push('internaldate < ?'); params.push(new Date(before).toISOString()); }
+    if (search) {
+      conds.push('(from_addr LIKE ? OR to_addr LIKE ? OR subject LIKE ?)');
+      const q = `%${search}%`;
+      params.push(q, q, q);
+    }
+    return this.db.prepare(
+      `SELECT id, uid, public_id, mailbox, flags, internaldate, from_addr, to_addr, subject, size
+         FROM messages WHERE ${conds.join(' AND ')} ORDER BY id DESC LIMIT ?`)
+      .all(...params, limit);
+  }
+  /** One message by its public `msg_…` id (docs/v1.md), scoped to the account. */
+  messageById(userId, publicId) {
+    return this.db.prepare('SELECT * FROM messages WHERE user_id = ? AND public_id = ?')
+      .get(userId, publicId);
   }
   // Address-scoped reads for the mailbox REST routes: a key for hello@domain must not
   // see the rest of the account's mail. INBOX is scoped by the envelope recipient the

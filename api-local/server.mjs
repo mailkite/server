@@ -15,7 +15,7 @@ import { createServer } from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import { Store } from './lib/db.mjs';
-import { headers, firstAddress, subject, textBody } from './lib/rfc822.mjs';
+import { headers, firstAddress, subject, textBody, htmlBody } from './lib/rfc822.mjs';
 import { buildMessage, parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
 import {
   authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
@@ -50,7 +50,17 @@ const readBody = (req) => new Promise((resolve, reject) => {
   req.on('error', reject);
 });
 
-const json = (res, status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+// The browser SDK can target a self-hosted API directly. Bearer-token requests do not
+// use cookies, so wildcard origins are safe by default; operators can narrow this with
+// CORS_ORIGIN for an internet-facing deployment.
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const setCorsHeaders = (res) => {
+  res.setHeader('access-control-allow-origin', CORS_ORIGIN);
+  res.setHeader('access-control-allow-headers', 'Authorization, Content-Type, X-Mailkite-UI');
+  res.setHeader('access-control-allow-methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS');
+  res.setHeader('access-control-max-age', '86400');
+};
+const json = (res, status, obj) => { setCorsHeaders(res); res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
 const constEq = (a, b) => { const A = Buffer.from(String(a)), B = Buffer.from(String(b)); return A.length === B.length && timingSafeEqual(A, B); };
 const edgeAuthed = (req) => constEq((req.headers.authorization || '').replace(/^Bearer /, ''), SECRET);
 
@@ -196,7 +206,7 @@ function metaFrom(raw, extra = {}) {
  * already happened and the caller has to say so.
  */
 async function deliverOutbound({ userId, raw, meta, rcpts }) {
-  store.storeMessage(userId, 'Sent', raw, { ...meta, flags: 'Seen', rcpt: rcpts.join(',') });
+  const { publicId: sentPublicId } = store.storeMessage(userId, 'Sent', raw, { ...meta, flags: 'Seen', rcpt: rcpts.join(',') });
   const external = [];
   let localDelivered = 0;
   for (const rcpt of rcpts) {
@@ -218,7 +228,7 @@ async function deliverOutbound({ userId, raw, meta, rcpts }) {
   } else if (external.length) {
     console.warn(`outbound: ${external.length} external recipient(s) NOT delivered (no SMARTHOST configured)`);
   }
-  return { localDelivered, external, relayed };
+  return { localDelivered, external, relayed, sentPublicId };
 }
 
 /**
@@ -376,7 +386,7 @@ const routes = {
       const userId = store.userForDomain(domain);
       if (userId == null) continue; // not ours; RCPT gating should have caught it
       if (store.messageExists(userId, 'INBOX', blobSha, rcpt)) { deduped++; continue; }
-      const uid = store.storeMessage(userId, 'INBOX', raw, metaFrom(raw, {
+      const { uid } = store.storeMessage(userId, 'INBOX', raw, metaFrom(raw, {
         to_addr: rcpt,
         mailfrom: req.headers['x-mailkite-mailfrom'] || '',
         rcpt: rcpt,
@@ -1132,6 +1142,174 @@ async function handleMailboxUid(req, res, rawBody, match) {
   return json(res, 200, { ok: true, uid, flags: String(body.flags ?? '') });
 }
 
+// ---- developer API (docs/v1.md) -------------------------------------------------
+// The same JSON surface api.mailkite.dev exposes for send/receive, authenticated by
+// API key, so SDKs and code written against MailKite Cloud run unchanged against a
+// self-hosted server — point the client's baseUrl here instead of api.mailkite.dev.
+// Underneath it is this server's own pipeline (buildMessage → deliverOutbound →
+// smarthost), so "send" means what it always meant here: local delivery plus whatever
+// SMARTHOST reaches. Hosted-only features (templates, scheduling, attachments,
+// tracking) are refused or ignored explicitly rather than silently differing.
+
+const apiKeyUser = (req) => {
+  const key = (req.headers.authorization || '').replace(/^Bearer /, '');
+  return key ? store.userForApiKey(key) : null;
+};
+const rcptList = (v) => (Array.isArray(v) ? v : String(v ?? '').split(',')).map((s) => s.trim()).filter(Boolean);
+
+/** A messages row → the message.json shape api.mailkite.dev's GET /api/messages returns. */
+function messageShape(row) {
+  return {
+    id: row.public_id,
+    user_id: `usr_local_${row.user_id}`,
+    route_id: null,
+    mailbox_id: row.mailbox === 'Sent' ? row.from_addr : row.to_addr,
+    direction: row.mailbox === 'Sent' ? 'outbound' : 'inbound',
+    from: { address: row.from_addr || '' },
+    to: [{ address: row.to_addr || '' }],
+    from_addr: row.from_addr,
+    to_addr: row.to_addr,
+    subject: row.subject,
+    received_at: Date.parse(row.internaldate),
+    size_bytes: row.size,
+    send_status: 'sent',
+  };
+}
+
+const sendFailure = (status, error, code, extra = {}) => ({ status, body: { error, code, ...extra } });
+
+/** Validate and deliver one JSON send request without coupling it to an HTTP response. */
+async function sendV1Message(userId, body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return sendFailure(400, 'invalid json body', 'bad_json');
+  }
+
+  // Hosted-only fields are refused loudly rather than silently not doing what they say.
+  for (const field of ['templateId', 'templateData', 'attachments', 'scheduledAt']) {
+    if (body[field] != null) {
+      return sendFailure(400, `${field} is not supported by the self-hosted server`, 'unsupported');
+    }
+  }
+
+  const from = String(body.from || '').trim();
+  if (!EMAIL_RE.test(from)) return sendFailure(400, 'from required', 'bad_from');
+  const fromDomain = (from.split('@')[1] || '').toLowerCase();
+  if (store.userForDomain(fromDomain) !== userId) {
+    return sendFailure(403, `From domain not owned by this account: ${fromDomain || '(none)'}`, 'from_domain');
+  }
+
+  const to = rcptList(body.to), cc = rcptList(body.cc), bcc = rcptList(body.bcc);
+  const rcpts = [...new Set([...to, ...cc, ...bcc])];
+  if (!rcpts.length) return sendFailure(400, 'to required', 'no_recipient');
+  const malformed = rcpts.filter((r) => !EMAIL_RE.test(r));
+  if (malformed.length) return sendFailure(400, `Not a valid address: ${malformed.join(', ')}`, 'bad_rcpt');
+
+  const subjectLine = String(body.subject ?? '');
+  if (!subjectLine) return sendFailure(400, 'subject required', 'bad_subject');
+  const html = body.html != null && body.html !== '' ? String(body.html) : undefined;
+  const text = body.text != null ? String(body.text) : undefined;
+  if (!html && !text) return sendFailure(400, 'html or text required', 'no_body');
+
+  for (const [name, value] of [['replyTo', body.replyTo], ['inReplyTo', body.inReplyTo]]) {
+    if (value != null && (typeof value !== 'string' || /[\r\n]/.test(value))) {
+      return sendFailure(400, `${name} must be a single-line string`, `bad_${name[0].toLowerCase()}${name.slice(1)}`);
+    }
+  }
+  if (body.headers != null &&
+      (typeof body.headers !== 'object' || Array.isArray(body.headers) ||
+       Object.entries(body.headers).some(([name, value]) =>
+         !/^[!-9;-~]+$/.test(name) || typeof value !== 'string' || /[\r\n]/.test(value)))) {
+    return sendFailure(400, 'headers must contain printable names and single-line string values', 'bad_headers');
+  }
+
+  // Refuse BEFORE storing anything: accepting mail we can't deliver, then filing it in
+  // Sent, would report success for a message that never leaves.
+  const external = rcpts.filter((r) => store.userForDomain(r.split('@')[1] || '') == null);
+  if (external.length && !SMARTHOST) {
+    return sendFailure(400,
+      `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud or smtp://…) to send beyond the domains it hosts.`,
+      'no_smarthost', { external });
+  }
+
+  const messageId = `<${randomUUID()}@${MESSAGE_ID_HOST}>`;
+  const message = Buffer.from(buildMessage({
+    from, to, cc, subject: subjectLine, text: text ?? '', html,
+    replyTo: body.replyTo,
+    inReplyTo: body.inReplyTo,
+    headers: body.headers,
+    messageId,
+  }), 'utf8');
+
+  try {
+    const out = await deliverOutbound({ userId, raw: message, meta: metaFrom(message), rcpts });
+    console.log(`v1/send: sent ${messageId} to ${rcpts.length} recipient(s)`);
+    return { status: 202, body: { id: out.sentPublicId, status: 'sent' } };
+  } catch (e) {
+    const reason = transportError(e.cause ?? e, SMARTHOST?.mode === 'smtp' ? { host: SMARTHOST.host, port: SMARTHOST.port } : {});
+    return sendFailure(502, reason.error, reason.code || 'send_failed');
+  }
+}
+
+Object.assign(routes, {
+  // Send JSON in, same shape as api.mailkite.dev/v1/send: { from, to, subject, html|text,
+  // cc?, bcc?, replyTo?, inReplyTo?, headers? }. Returns { id, status }.
+  'POST /v1/send': async (req, res, raw) => {
+    const userId = apiKeyUser(req);
+    if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });
+    let body;
+    try { body = JSON.parse(raw.toString() || '{}'); } catch { return json(res, 400, { error: 'invalid json body', code: 'bad_json' }); }
+    const result = await sendV1Message(userId, body);
+    return json(res, result.status, result.body);
+  },
+
+  'POST /v1/send/batch': async (req, res, raw) => {
+    const userId = apiKeyUser(req);
+    if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });
+    let body;
+    try { body = JSON.parse(raw.toString() || '{}'); } catch { return json(res, 400, { error: 'invalid json body', code: 'bad_json' }); }
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !body.from) {
+      return json(res, 400, { error: 'from required', code: 'bad_from' });
+    }
+    if (!Array.isArray(body.recipients) || body.recipients.length === 0) {
+      return json(res, 400, { error: 'recipients (a non-empty array) required', code: 'no_recipient' });
+    }
+    if (body.recipients.length > 50) {
+      return json(res, 400, { error: 'too many recipients — max 50 per batch', code: 'batch_too_large' });
+    }
+    const results = [];
+    for (const recipient of body.recipients) {
+      const item = { ...body, ...recipient, to: recipient?.to };
+      delete item.recipients;
+      const result = await sendV1Message(userId, item);
+      results.push(result.status < 300
+        ? { to: recipient?.to, id: result.body.id, status: 'sent' }
+        : { to: recipient?.to, status: 'failed', error: result.body.error, code: result.body.code });
+    }
+    const sent = results.filter((item) => item.status === 'sent').length;
+    return json(res, 200, { results, sent, scheduled: 0, failed: results.length - sent });
+  },
+
+  // Minimal account probe. The self-hosted server has no account email or plan to report,
+  // so the fields are honest stubs — present so SDK clients that ping this on connect don't fail.
+  'GET /v1/me': async (req, res) => {
+    const userId = apiKeyUser(req);
+    if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });
+    return json(res, 200, { email: null, verified: true, plan: 'self-hosted' });
+  },
+
+  // Account-wide message list across INBOX + Sent, newest first — the receive half of
+  // the developer API. Returns a bare array (like the cloud); page with before=received_at.
+  'GET /api/messages': async (req, res) => {
+    const userId = apiKeyUser(req);
+    if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });
+    const q = new URL(req.url, 'http://x').searchParams;
+    const limit = Math.min(Number(q.get('limit')) || 100, 200);
+    const before = q.get('before') ? Number(q.get('before')) : null;
+    const search = q.get('search') || null;
+    return json(res, 200, store.listAccount(userId, { limit, before, search }).map(messageShape));
+  },
+});
+
 // ---- static UI ----------------------------------------------------------------
 // Serves ui/dist when present (built SPA); the UI calls the admin API same-origin.
 import { readFileSync as readFs, existsSync as existsFs } from 'node:fs';
@@ -1163,6 +1341,34 @@ function serveUi(req, res) {
 // The table is exact-path; the few routes with an id in the path are matched here.
 const PARAM_ROUTES = [
   { rx: MAILBOX_UID_ROUTE, handler: handleMailboxUid },
+  {
+    rx: /^\/api\/messages\/([A-Za-z0-9_-]+)$/,
+    handler: async (req, res, _raw, match) => {
+      if (req.method !== 'GET') return json(res, 405, { error: 'use GET', code: 'bad_method' });
+      const userId = apiKeyUser(req);
+      if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });
+      const row = store.messageById(userId, match[1]);
+      if (!row) return json(res, 404, { error: 'no such message', code: 'not_found' });
+      const raw = store.getBlob(row.blob);
+      const detail = messageShape({ ...row, public_id: row.public_id });
+      // Detail responses carry bodies; the list rows deliberately don't.
+      detail.text_body = raw ? textBody(raw) : null;
+      detail.html_body = raw ? htmlBody(raw) : null;
+      detail.headers_json = raw ? JSON.stringify(headers(raw)) : null;
+      // Keep the cloud message-detail envelope even though self-hosted does not have
+      // cloud delivery-attempt, tracking, or attachment records to populate.
+      return json(res, 200, {
+        message: detail,
+        actor_email: null,
+        actor_team_name: null,
+        deliveries: [],
+        events: [],
+        deliveryAttempts: [],
+        opens: [],
+        attachments: [],
+      });
+    },
+  },
   {
     rx: /^\/api\/admin\/app-passwords\/(\d+)$/,
     handler: async (req, res, raw, match) => {
@@ -1266,6 +1472,11 @@ const PARAM_ROUTES = [
 ];
 
 const handle = async (req, res) => {
+  setCorsHeaders(res);
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204);
+    return res.end();
+  }
   const pathname = new URL(req.url, 'http://x').pathname;
   const handler = routes[`${req.method} ${pathname}`];
   let param = null;

@@ -189,9 +189,15 @@ function bodyPart(contentType, content) {
  * `bcc` is deliberately absent: blind recipients belong in the envelope the caller
  * passes to the smarthost, never in the headers, or they stop being blind.
  */
-export function buildMessage({ from, to, cc, subject, text, html, messageId, date, inReplyTo }) {
+export function buildMessage({ from, to, cc, subject, text, html, messageId, date, inReplyTo, replyTo, headers: extraHeaders }) {
   const toList = addrList(to);
   const ccList = addrList(cc);
+  // Extra raw headers (the JSON send API's `headers`): only printable-ASCII names and
+  // values with no newlines pass — anything else is a header-injection attempt. Values
+  // that aren't ASCII-safe are RFC2047-encoded rather than dropped.
+  const extra = Object.entries(extraHeaders || {})
+    .filter(([k, v]) => /^[!-9;-~]+$/.test(k) && !/[\r\n]/.test(String(v)))
+    .map(([k, v]) => `${k}: ${encodeHeader(v)}`);
   const head = [
     `From: ${from}`,
     `To: ${toList.join(', ')}`,
@@ -199,9 +205,11 @@ export function buildMessage({ from, to, cc, subject, text, html, messageId, dat
     `Subject: ${encodeHeader(subject)}`,
     `Date: ${(date ?? new Date()).toUTCString()}`,
     ...(messageId ? [`Message-ID: ${messageId}`] : []),
+    ...(replyTo ? [`Reply-To: ${replyTo}`] : []),
     // Both headers, because clients disagree about which one threads: Apple Mail and
     // Outlook follow In-Reply-To, Gmail walks References.
     ...(inReplyTo ? [`In-Reply-To: ${inReplyTo}`, `References: ${inReplyTo}`] : []),
+    ...extra,
     'MIME-Version: 1.0',
   ];
 
