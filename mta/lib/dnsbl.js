@@ -166,6 +166,9 @@ class Dnsbl {
     this.timeoutMs = Number(opts.timeoutMs) || 2000;
     this.resolvers = opts.resolvers || [];
     this.cacheTtlMs = Number(opts.cacheTtlMs) || 600000; // 10 min
+    // How long a FAILED canary is believed before we re-probe. Deliberately much shorter than
+    // cacheTtlMs — see canary().
+    this.canaryRetryMs = Number(opts.canaryRetryMs) || 30000; // 30s
     this.now = opts.now || (() => Date.now());
     this.lookup = opts.lookup || makeResolver({ resolvers: this.resolvers, timeoutMs: this.timeoutMs });
     // Separate resolver binding because the two zones classify their answers DIFFERENTLY —
@@ -177,9 +180,11 @@ class Dnsbl {
     this.cache = new Map();
     // The canary is per-batch in the outbound endpoint; here connections arrive one at a
     // time, so it is cached for the same TTL rather than re-probed on every SMTP connect.
-    this.canaryAt = 0;
+    // null, not 0: an injected clock legitimately returns 0, and a falsy check would then read
+    // "checked at time 0" as "never checked" and re-probe on every call.
+    this.canaryAt = null;
     this.canaryOk = false;
-    this.canaryDomainAt = 0;
+    this.canaryDomainAt = null;
     this.canaryDomainOk = false;
   }
 
@@ -188,7 +193,17 @@ class Dnsbl {
    * cache TTL. Two probes with known-opposite expected verdicts.
    */
   async canary() {
-    if (this.canaryAt && this.now() - this.canaryAt < this.cacheTtlMs) return this.canaryOk;
+    // A PASS is believed for the full TTL; a FAILURE only briefly. The two are not equally
+    // trustworthy and must not share a lifetime.
+    //
+    // This module already refuses to cache an `unknown` verdict, because caching one pins a wrong
+    // answer for the process's life. The canary GATES every one of those verdicts, so caching a
+    // failed canary for ten minutes does the same damage wholesale: one transient DNS blip — and
+    // one was observed in production on 2026-09-01, with the zone answering correctly seconds
+    // either side — turns every IP into `unknown` for ten minutes, silently disabling the
+    // heaviest signal we have. Failing open is correct; staying failed open is not.
+    const age = this.canaryAt === null ? Infinity : this.now() - this.canaryAt;
+    if (age < (this.canaryOk ? this.cacheTtlMs : this.canaryRetryMs)) return this.canaryOk;
     const [listed, clean] = await Promise.all([
       this.lookup(`${reverseIp(this.canaryListedIp)}.${this.zoneIp}`),
       this.lookup(`${reverseIp(this.canaryCleanIp)}.${this.zoneIp}`),
@@ -229,7 +244,9 @@ class Dnsbl {
    * makes the listed probe come back not-listed.
    */
   async canaryDomain() {
-    if (this.canaryDomainAt && this.now() - this.canaryDomainAt < this.cacheTtlMs) return this.canaryDomainOk;
+    // Same asymmetry as canary(): believe a pass for the TTL, re-probe a failure quickly.
+    const age = this.canaryDomainAt === null ? Infinity : this.now() - this.canaryDomainAt;
+    if (age < (this.canaryDomainOk ? this.cacheTtlMs : this.canaryRetryMs)) return this.canaryDomainOk;
     const listed = await this.lookupDomain(`${this.canaryListedDomain}.${this.zoneDomain}`);
     this.canaryDomainOk = listed === LISTED;
     this.canaryDomainAt = this.now();

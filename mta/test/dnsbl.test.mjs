@@ -208,3 +208,61 @@ test('the two zones are independent — a broken DBL leaves the IP check working
   assert.equal((await bl.check('1.2.3.4')).verdict, 'listed');
   assert.equal((await bl.checkDomain('evil.com')).verdict, 'unknown');
 });
+
+// ---- canary failure must not be sticky ------------------------------------------------------
+// A pass and a failure are not equally trustworthy and must not share a cache lifetime. Observed
+// in production 2026-09-01: one transient blip, with the zone answering correctly seconds either
+// side, would have disabled the heaviest signal for the full 10-minute TTL.
+
+test('a transient canary failure is re-probed quickly, not cached for the full TTL', async () => {
+  let clock = 0;
+  let broken = true;
+  const lookup = async (name) => {
+    if (name === '2.0.0.127.zen.spamhaus.org') return broken ? 'unknown' : 'listed';
+    if (name === '1.0.0.127.zen.spamhaus.org') return 'clean';
+    return '1.2.3.4' === name.replace('.zen.spamhaus.org', '').split('.').reverse().join('.') ? 'listed' : 'clean';
+  };
+  const bl = new Dnsbl({ lookup, now: () => clock, cacheTtlMs: 600000, canaryRetryMs: 30000 });
+
+  assert.equal(await bl.canary(), false, 'blip observed');
+  broken = false;                       // the zone recovers immediately
+
+  clock = 10000;                        // 10s later — still inside the retry window
+  assert.equal(await bl.canary(), false, 'not re-probed yet, which is fine');
+
+  clock = 31000;                        // 31s later — past the retry window
+  assert.equal(await bl.canary(), true, 're-probed and recovered');
+  assert.equal((await bl.check('1.2.3.4')).verdict, 'listed', 'the signal is live again');
+});
+
+test('a PASSING canary is still cached for the full TTL (no extra query load)', async () => {
+  let clock = 0;
+  let calls = 0;
+  const lookup = async (name) => {
+    calls++;
+    if (name === '2.0.0.127.zen.spamhaus.org') return 'listed';
+    if (name === '1.0.0.127.zen.spamhaus.org') return 'clean';
+    return 'clean';
+  };
+  const bl = new Dnsbl({ lookup, now: () => clock, cacheTtlMs: 600000, canaryRetryMs: 30000 });
+  assert.equal(await bl.canary(), true);
+  const afterFirst = calls;
+  clock = 60000;                        // a minute later — well past canaryRetryMs
+  assert.equal(await bl.canary(), true);
+  assert.equal(calls, afterFirst, 'a passing canary was not re-probed');
+});
+
+test('the domain canary has the same asymmetry', async () => {
+  let clock = 0;
+  let broken = true;
+  const lookupDomain = async (name) =>
+    name === 'dbltest.com.dbl.spamhaus.org' ? (broken ? 'unknown' : 'listed') : 'clean';
+  const bl = new Dnsbl({ lookupDomain, now: () => clock, cacheTtlMs: 600000, canaryRetryMs: 30000 });
+
+  assert.equal(await bl.canaryDomain(), false);
+  broken = false;
+  clock = 10000;
+  assert.equal(await bl.canaryDomain(), false);
+  clock = 31000;
+  assert.equal(await bl.canaryDomain(), true);
+});
