@@ -153,3 +153,81 @@ test('multi-backend: un-noted recipient falls back to highest-priority backend',
   assert.equal(fetches[0].url, 'https://only.example/api/ingest');
   delete process.env.S_A;
 });
+
+// ---- read_verdicts: SPF identity + type ---------------------------------------------------
+// The MAIL FROM result is a WORD; connection.notes.spf_helo is a NUMERIC enum for a DIFFERENT
+// identity (RFC 7208 §2.3). Falling back from one to the other put 24,386 rows of '1'/'2'/'3'
+// into `messages.spf`, where the Worker's scorer matched none of them — SPF silently contributed
+// nothing for that mail, and consumers got `auth.spf: "2"`.
+
+const verdicts = (txnNotes = {}, connNotes = {}) => {
+  const proto = require_('../plugins/mailkite_ingest.js');
+  return proto.read_verdicts({ notes: connNotes, remote: {} }, { notes: txnNotes, results: { get: () => null } });
+};
+
+test('read_verdicts: the MAIL FROM result word is lowercased and used', () => {
+  assert.equal(verdicts({ spf_mail_result: 'Pass' }).spf, 'pass');
+  assert.equal(verdicts({ spf_mail_result: 'SoftFail' }).spf, 'softfail');
+  assert.equal(verdicts({ spf_mail_result: '  Fail  ' }).spf, 'fail');
+});
+
+test('read_verdicts: the NUMERIC helo result is never stored as `spf`', () => {
+  // The regression. Every one of these used to become spf='1'/'2'/'3'.
+  for (const code of [1, 2, 3, 4, 5, 6, 7]) {
+    assert.equal(verdicts({}, { spf_helo: code }).spf, undefined, `helo ${code}`);
+  }
+});
+
+test('read_verdicts: no MAIL FROM result means ABSENT, not a substituted one', () => {
+  // Absent is honest — the Worker reads it as "not checked" rather than as a verdict we never got.
+  assert.equal(verdicts({}, { spf_helo: 2 }).spf, undefined);
+  assert.equal(verdicts({}).spf, undefined);
+  assert.equal(verdicts({ spf_mail_result: '' }).spf, undefined);
+  assert.equal(verdicts({ spf_mail_result: null }).spf, undefined);
+});
+
+test('read_verdicts: a non-string MAIL FROM result is refused too', () => {
+  // Belt and braces: if the plugin ever hands back a code here, it must not become a fake word.
+  assert.equal(verdicts({ spf_mail_result: 2 }).spf, undefined);
+});
+
+// ---- mailkite_spam.sender_domain ----------------------------------------------------------
+// The whole correctness of the sender-domain blocklist check: score the wrong domain and the
+// verdict is worse than useless, because it looks like a check that ran.
+
+const senderDomain = (h) => require_('../plugins/mailkite_spam.js').sender_domain(h);
+
+test('sender_domain: plain and display-name forms', () => {
+  assert.equal(senderDomain('a@b.com'), 'b.com');
+  assert.equal(senderDomain('Foo Bar <a@b.com>'), 'b.com');
+  assert.equal(senderDomain('<a@b.com>'), 'b.com');
+  assert.equal(senderDomain('Foo <a@B.CoM>'), 'b.com');
+});
+
+test('sender_domain: a display name containing @ must NOT win', () => {
+  // The phishing shape this check exists for. Reading the first @ scores the SPOOFED name
+  // (paypal.com — clean) and reports the message clean on a domain the sender doesn't own.
+  assert.equal(senderDomain('"sales@paypal.com" <x@evil.ru>'), 'evil.ru');
+  assert.equal(senderDomain('sales@paypal.com <x@evil.ru>'), 'evil.ru');
+  assert.equal(senderDomain('"billing@apple.com" <fraud@bad.example>'), 'bad.example');
+});
+
+test('sender_domain: a quoted local part containing @ is not the domain', () => {
+  assert.equal(senderDomain('"weird@local"@b.com'), 'b.com'); // RFC 5322 §3.4.1
+});
+
+test('sender_domain: trailing root-label dot and stray delimiters are stripped', () => {
+  assert.equal(senderDomain('Foo <a@b.com.>'), 'b.com');
+  assert.equal(senderDomain('a@b.com;'), 'b.com');
+  assert.equal(senderDomain(' a@b.com \n'), 'b.com');
+});
+
+test('sender_domain: nothing to score returns empty, never a guess', () => {
+  for (const bad of ['', null, undefined, 'no-at-here', 'Foo <>', '   ']) {
+    assert.equal(senderDomain(bad), '', JSON.stringify(bad));
+  }
+});
+
+test('sender_domain: a multi-address From takes the first sender', () => {
+  assert.equal(senderDomain('A <a@b.com>, C <c@d.com>'), 'b.com');
+});

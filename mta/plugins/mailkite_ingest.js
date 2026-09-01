@@ -80,9 +80,28 @@ exports.hook_queue = function (next, connection) {
 exports.read_verdicts = function (connection, txn) {
   const v = {};
   try {
-    // SPF: the MAIL FROM result is stashed on txn.notes by haraka-plugin-spf.
-    const spf = txn?.notes?.spf_mail_result ?? connection?.notes?.spf_helo;
-    if (spf) v.spf = String(spf).toLowerCase();
+    // SPF for the MAIL FROM identity — a WORD ('Pass', 'SoftFail', …), lowercased here because
+    // that is the vocabulary the Worker's scorer and the published `auth.spf` contract use.
+    //
+    // DO NOT FALL BACK TO connection.notes.spf_helo. That used to be here and it was wrong twice
+    // over:
+    //
+    //   TYPE — spf_helo is haraka-plugin-spf's NUMERIC enum (1=None, 2=Pass, 3=Fail, 4=SoftFail,
+    //   5=Neutral, 6=TempError, 7=PermError), not a result word. It landed in the same column as
+    //   the strings, so `messages.spf` grew mixed types: 24,386 stored rows across 6 accounts
+    //   read '1'/'2'/'3'. Consumers got `auth.spf: "2"`, and the scorer — which compares against
+    //   'fail'/'softfail' — silently matched none of them, so SPF contributed nothing at all for
+    //   that mail.
+    //
+    //   IDENTITY — HELO and MAIL FROM are DIFFERENT identities (RFC 7208 §2.3), and a HELO result
+    //   answers a question nobody asked here. A HELO 'None' is unremarkable and says nothing about
+    //   the envelope sender, but stored as `spf` it reads as "we checked SPF and got None". The
+    //   silent substitution meant a value's MEANING changed with no way for any reader to tell.
+    //
+    // Absent is now absent: no MAIL FROM result → `spf` stays null → the scorer reads "not
+    // checked", which is true, instead of an authentication claim we never made.
+    const spf = txn?.notes?.spf_mail_result;
+    if (typeof spf === 'string' && spf.trim()) v.spf = spf.trim().toLowerCase();
   } catch { /* ignore */ }
   try {
     // DKIM: ResultStore entry has .pass (domain) or .fail.

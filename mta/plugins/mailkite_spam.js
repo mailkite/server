@@ -104,9 +104,7 @@ exports.check_sender_domain = function (next, connection) {
   // address (VERP, list bounce paths) and judging a domain by it would score the wrong party.
   let domain = '';
   try {
-    const raw = txn.header && txn.header.get('from');
-    const m = String(raw || '').match(/@([^\s>;,]+)/);
-    domain = m ? m[1].trim().toLowerCase().replace(/[.>]+$/, '') : '';
+    domain = exports.sender_domain(txn.header && txn.header.get('from'));
   } catch { /* malformed header — nothing to score, and never a reason to refuse mail */ }
   if (!domain) return note({ verdict: UNKNOWN, zone: null, canary: false });
 
@@ -117,4 +115,33 @@ exports.check_sender_domain = function (next, connection) {
     plugin.logerror(`mailkite_spam: dbl check failed ${e.message}`);
     note({ verdict: UNKNOWN, zone: null, canary: false });
   });
+};
+
+/**
+ * The domain of a From header's ADDRESS. Exported for test/ingest.test.mjs — it is the whole
+ * correctness of the sender-domain check, so it is tested directly rather than through Haraka.
+ *
+ * The angle brackets are read FIRST, and that is the entire point. A display name may legally
+ * contain an @, and the shape that abuses it is the one this check most needs to get right:
+ *
+ *     From: "sales@paypal.com" <x@evil.ru>
+ *
+ * Scanning for the first @ scores `paypal.com` — the spoofed name — and reports the message
+ * CLEAN on the strength of a domain the sender does not own. The real sender is in the brackets.
+ * Reading the last @ of the address matters for the same reason: a quoted local part may contain
+ * one (RFC 5322 §3.4.1).
+ */
+exports.sender_domain = function (headerValue) {
+  const raw = String(headerValue || '').trim();
+  if (!raw) return '';
+  // A group/multi-address From is rare and ambiguous; the first address is the sender.
+  const angle = raw.match(/<([^>]*)>/);
+  const addr = (angle ? angle[1] : raw.split(',')[0]).trim();
+  const at = addr.lastIndexOf('@');
+  if (at === -1) return '';
+  return addr
+    .slice(at + 1)
+    .trim()
+    .toLowerCase()
+    .replace(/^[<'"\s]+|[>'"\s.;,]+$/g, ''); // stray delimiters either side, and a root-label dot
 };
