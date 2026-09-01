@@ -38,8 +38,18 @@ const TLS_KEY = process.env.TLS_KEY || `${__dirname}/config/tls/tls_key.pem`;
 if (!HMAC) { console.error('mailkite-imap: MAILKITE_HMAC_SECRET is required'); process.exit(1); }
 if (typeof fetch !== 'function') { console.error('mailkite-imap: Node 18+ (global fetch) required'); process.exit(1); }
 
-// v1 mailbox set. INBOX = inbound, Sent = outbound.
-const MAILBOXES = ['INBOX', 'Sent'];
+// Mailbox set. INBOX = inbound, Sent = outbound, Junk = inbound that scored as spam.
+//
+// INBOX and Junk PARTITION inbound mail — the Worker derives membership per read from the same rule
+// the web inbox uses (docs/architecture/inbound-spam.md), so marking something "Not spam" in the
+// dashboard moves it here too, and a client never sees the same message in both. Nothing was
+// withheld to put mail in Junk: it was stored, routed and POSTed to the customer's webhook exactly
+// like inbox mail — the verdict is a flag, and this folder is only where we show it.
+const MAILBOXES = ['INBOX', 'Sent', 'Junk'];
+
+// RFC 6154 special-use attributes, so clients auto-map these to their own Sent/Junk UI instead of
+// treating them as arbitrary folders — which is what makes "Move to Junk" in Apple Mail land here.
+const SPECIAL_USE = { Sent: '\\Sent', Junk: '\\Junk' };
 
 const logger = {
   info() {},
@@ -147,7 +157,7 @@ server.onAuth = function (login, session, cb) {
 };
 
 server.onList = function (query, session, cb) {
-  cb(null, MAILBOXES.map((path) => ({ path, specialUse: path === 'Sent' ? '\\Sent' : undefined })));
+  cb(null, MAILBOXES.map((path) => ({ path, specialUse: SPECIAL_USE[path] })));
 };
 server.onLsub = function (query, session, cb) { server.onList(query, session, cb); };
 server.onSubscribe = (m, s, cb) => cb(null, true);
@@ -162,7 +172,7 @@ server.onOpen = function (mailbox, session, cb) {
       const st = await res.json();
       const lr = await api('/api/imap/list', { userId: session.user.userId, mailboxId: session.user.mailboxId, mailbox });
       const { messages } = await lr.json();
-      cb(null, { specialUse: mailbox === 'Sent' ? '\\Sent' : undefined, uidValidity: st.uidvalidity, uidNext: st.uidnext, modifyIndex: 0, uidList: messages.map((m) => m.uid) });
+      cb(null, { specialUse: SPECIAL_USE[mailbox], uidValidity: st.uidvalidity, uidNext: st.uidnext, modifyIndex: 0, uidList: messages.map((m) => m.uid) });
     })
     .catch((e) => { logger.error('open', e.message); cb(e); });
 };

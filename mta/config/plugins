@@ -13,6 +13,12 @@ spf
 dkim
 #rspamd
 
+# Inbound spam SIGNAL only — a DNSBL lookup on the connecting IP, which is the one spam
+# input the Worker cannot compute (by /api/ingest the TCP peer is us). It has NO reject
+# path: spam is a flag, never a gate — docs/architecture/inbound-spam.md §1. Fails open to
+# `unknown` (never `clean`) on any config/resolver/timeout failure.
+mailkite_spam
+
 # STARTTLS. Reads certs from config/tls/ (tls_cert.pem + tls_key.pem), placed there by
 # /usr/local/bin/mailkite-mta-tls-deploy.sh on issue and on every renewal — see
 # config/tls.ini and README §TLS. Without it the edge accepts mail in the clear.

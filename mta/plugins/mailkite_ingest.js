@@ -104,6 +104,20 @@ exports.read_verdicts = function (connection, txn) {
       if (rspamd.action) v.spamVerdict = String(rspamd.action);
     }
   } catch { /* ignore */ }
+  try {
+    // DNSBL on the connecting IP, from our own mailkite_spam plugin (connect hook).
+    // Tri-state: listed | clean | unknown, where `unknown` is NEVER `clean` — see
+    // lib/dnsbl.js. Only a canary-verified verdict is forwarded; an unproven one is
+    // indistinguishable from "we didn't check", which is exactly what the Worker must
+    // read it as. The IP rides along so the Worker can record WHAT was scored.
+    const bl = connection?.notes?.mailkite_dnsbl;
+    if (bl && bl.canary && (bl.verdict === 'listed' || bl.verdict === 'clean')) {
+      v.dnsbl = bl.verdict;
+      if (bl.zone) v.dnsblZone = bl.zone;
+    }
+    const ip = connection?.remote?.ip;
+    if (ip) v.remoteIp = String(ip);
+  } catch { /* ignore */ }
   return v;
 };
 
@@ -187,6 +201,10 @@ exports.post_to_ingest = function (connection, txn, raw, next) {
     if (verdicts.dmarc) headers['x-mailkite-dmarc'] = verdicts.dmarc;
     if (verdicts.spam) headers['x-mailkite-spam'] = verdicts.spam;
     if (verdicts.spamVerdict) headers['x-mailkite-spam-verdict'] = verdicts.spamVerdict;
+    // Inbound spam SIGNALS (never a verdict the edge acted on) — the Worker scores them.
+    if (verdicts.dnsbl) headers['x-mailkite-dnsbl'] = verdicts.dnsbl;
+    if (verdicts.dnsblZone) headers['x-mailkite-dnsbl-zone'] = verdicts.dnsblZone;
+    if (verdicts.remoteIp) headers['x-mailkite-remote-ip'] = verdicts.remoteIp;
 
     return fetch(t.url, { method: 'POST', headers, body: raw }).then((res) => {
       if (res.ok) {
