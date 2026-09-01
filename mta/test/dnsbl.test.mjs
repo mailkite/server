@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import dnsbl from '../lib/dnsbl.js';
 
-const { Dnsbl, classify, reverseIp, isIpv4 } = dnsbl;
+const { Dnsbl, classify, classifyDomain, isQueryableDomain, reverseIp, isIpv4 } = dnsbl;
 
 test('classify: listing return codes are `listed`', () => {
   assert.equal(classify(['127.0.0.2'], null), 'listed');   // zen
@@ -125,4 +125,86 @@ test('cache and canary expire together on the TTL', async () => {
   clock = 2000;
   await bl.check('1.2.3.4');
   assert.ok(lookup.calls.length > first, 'expired entries are re-queried');
+});
+
+// ---- Domain zone (DBL) -------------------------------------------------------------------
+// Separate list, separate return codes. Reusing the IP classifier here is a live false positive,
+// which is what most of these pin.
+
+test('classifyDomain: the dedicated spam/phish/malware/botnet codes are listed', () => {
+  for (const a of ['127.0.1.2', '127.0.1.4', '127.0.1.5', '127.0.1.6']) {
+    assert.equal(classifyDomain([a], null), 'listed', a);
+  }
+});
+
+test('classifyDomain: "abused legit" codes are listed too (we flag, we never block)', () => {
+  for (const a of ['127.0.1.102', '127.0.1.103', '127.0.1.104', '127.0.1.105', '127.0.1.106']) {
+    assert.equal(classifyDomain([a], null), 'listed', a);
+  }
+});
+
+test('classifyDomain: 127.0.1.255 is an ERROR, not a listing', () => {
+  // "IP queries prohibited" — what dbl answers when asked about 8.8.8.8. The IP-zone classifier
+  // reads this as listed (it matches 127.0.[012].x), which would flag a message as spam on the
+  // strength of an error message. This is the whole reason the two classifiers are separate.
+  assert.equal(classifyDomain(['127.0.1.255'], null), 'unknown');
+  assert.equal(classify(['127.0.1.255'], null), 'listed'); // the bug, pinned so it can't come back
+});
+
+test('classifyDomain: NXDOMAIN is clean, everything else is unknown', () => {
+  assert.equal(classifyDomain(null, { code: 'ENOTFOUND' }), 'clean');
+  assert.equal(classifyDomain([], null), 'clean');
+  assert.equal(classifyDomain(null, { code: 'SERVFAIL' }), 'unknown');
+  assert.equal(classifyDomain(['127.255.255.254'], null), 'unknown');
+  assert.equal(classifyDomain(['10.0.0.1'], null), 'unknown');
+});
+
+test('isQueryableDomain rejects what the domain zone cannot answer', () => {
+  assert.equal(isQueryableDomain('evil.example.com'), true);
+  assert.equal(isQueryableDomain('thiswater.top'), true);
+  assert.equal(isQueryableDomain('8.8.8.8'), false); // → the 127.0.1.255 error above
+  assert.equal(isQueryableDomain('localhost'), false); // no dot
+  assert.equal(isQueryableDomain(''), false);
+  assert.equal(isQueryableDomain(undefined), false);
+});
+
+const fakeDomainLookup = (listed = [], { breakCanary = false } = {}) => async (name) => {
+  if (name === 'dbltest.com.dbl.spamhaus.org') return breakCanary ? 'unknown' : 'listed';
+  const d = name.replace('.dbl.spamhaus.org', '');
+  return listed.includes(d) ? 'listed' : 'clean';
+};
+
+test('checkDomain: a listed sender domain reports listed', async () => {
+  const bl = new Dnsbl({ lookupDomain: fakeDomainLookup(['thiswater.top']) });
+  assert.deepEqual(await bl.checkDomain('thiswater.top'), { verdict: 'listed', zone: 'dbl.spamhaus.org', canary: true });
+  assert.equal((await bl.checkDomain('gmail.com')).verdict, 'clean');
+});
+
+test('checkDomain: case and stray punctuation are normalised', async () => {
+  const bl = new Dnsbl({ lookupDomain: fakeDomainLookup(['thiswater.top']) });
+  assert.equal((await bl.checkDomain('  ThisWater.TOP ')).verdict, 'listed');
+});
+
+test('checkDomain: a failed domain canary collapses a listing to unknown', async () => {
+  const bl = new Dnsbl({ lookupDomain: fakeDomainLookup(['thiswater.top'], { breakCanary: true }) });
+  assert.equal((await bl.checkDomain('thiswater.top')).verdict, 'unknown');
+});
+
+test('checkDomain: an unqueryable name never reaches the resolver', async () => {
+  let called = 0;
+  const bl = new Dnsbl({ lookupDomain: async () => { called++; return 'listed'; } });
+  for (const bad of ['8.8.8.8', 'localhost', '', null]) {
+    assert.equal((await bl.checkDomain(bad)).verdict, 'unknown');
+  }
+  assert.equal(called, 0);
+});
+
+test('the two zones are independent — a broken DBL leaves the IP check working', async () => {
+  // One refused zone should cost one signal, not both.
+  const bl = new Dnsbl({
+    lookup: fakeLookup(['1.2.3.4']),
+    lookupDomain: fakeDomainLookup(['evil.com'], { breakCanary: true }),
+  });
+  assert.equal((await bl.check('1.2.3.4')).verdict, 'listed');
+  assert.equal((await bl.checkDomain('evil.com')).verdict, 'unknown');
 });

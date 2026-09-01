@@ -117,6 +117,12 @@ exports.read_verdicts = function (connection, txn) {
     }
     const ip = connection?.remote?.ip;
     if (ip) v.remoteIp = String(ip);
+    // Sender-domain blocklist (mailkite_spam data_post hook). Same canary rule as the IP zone:
+    // an unproven verdict is indistinguishable from "we didn't check", so it isn't forwarded.
+    const dbl = txn?.notes?.mailkite_dbl;
+    if (dbl && dbl.canary && (dbl.verdict === 'listed' || dbl.verdict === 'clean')) {
+      v.dbl = dbl.verdict;
+    }
   } catch { /* ignore */ }
   return v;
 };
@@ -204,6 +210,7 @@ exports.post_to_ingest = function (connection, txn, raw, next) {
     // Inbound spam SIGNALS (never a verdict the edge acted on) — the Worker scores them.
     if (verdicts.dnsbl) headers['x-mailkite-dnsbl'] = verdicts.dnsbl;
     if (verdicts.dnsblZone) headers['x-mailkite-dnsbl-zone'] = verdicts.dnsblZone;
+    if (verdicts.dbl) headers['x-mailkite-dbl'] = verdicts.dbl;
     if (verdicts.remoteIp) headers['x-mailkite-remote-ip'] = verdicts.remoteIp;
 
     return fetch(t.url, { method: 'POST', headers, body: raw }).then((res) => {

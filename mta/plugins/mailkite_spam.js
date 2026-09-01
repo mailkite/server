@@ -26,6 +26,7 @@
 //
 // Config — config/mailkite.ini [dnsbl], env wins:
 //   MAILKITE_DNSBL_ZONE       IP blocklist zone         (default zen.spamhaus.org)
+//   MAILKITE_DBL_ZONE         domain blocklist zone     (default dbl.spamhaus.org)
 //   MAILKITE_DNSBL_RESOLVERS  comma-separated resolver IPs; blank = /etc/resolv.conf
 //   MAILKITE_DNSBL_ENABLED    "0" to disable the lookup entirely
 
@@ -35,6 +36,8 @@ const { Dnsbl, UNKNOWN } = require(path.join(__dirname, '..', 'lib', 'dnsbl.js')
 exports.register = function () {
   this.load_cfg();
   this.register_hook('connect', 'check_dnsbl');
+  // data_post, not connect: the From HEADER doesn't exist until the message body has been read.
+  this.register_hook('data_post', 'check_sender_domain');
 };
 
 exports.load_cfg = function () {
@@ -46,8 +49,10 @@ exports.load_cfg = function () {
     .split(',').map((s) => s.trim()).filter(Boolean);
   this.dnsbl = new Dnsbl({
     zoneIp: env.MAILKITE_DNSBL_ZONE || d.zone_ip,
+    zoneDomain: env.MAILKITE_DBL_ZONE || d.zone_domain,
     canaryListedIp: d.canary_listed_ip,
     canaryCleanIp: d.canary_clean_ip,
+    canaryListedDomain: d.canary_listed_domain,
     resolvers,
     timeoutMs: Number(d.timeout_ms),
     cacheTtlMs: Number(d.cache_ttl_ms),
@@ -73,6 +78,43 @@ exports.check_dnsbl = function (next, connection) {
     note(res);
   }).catch((e) => {
     plugin.logerror(`mailkite_spam: dnsbl check failed ${e.message}`);
+    note({ verdict: UNKNOWN, zone: null, canary: false });
+  });
+};
+
+// `data_post` hook — the sender DOMAIN from the From header, against the domain blocklist.
+//
+// WHY A SECOND LOOKUP, when we already check the connecting IP: the IP is the better signal live,
+// but it exists only inside the SMTP session. The domain is IN the message, which means the same
+// check can run over stored mail — it is the only spam signal we can compute BOTH live and
+// retroactively, and running one code path for both is what stops them drifting.
+//
+// Like check_dnsbl, this CANNOT reject: `next()` on every branch. See the header.
+exports.check_sender_domain = function (next, connection) {
+  const plugin = this;
+  const txn = connection && connection.transaction;
+  const note = (v) => {
+    if (txn) txn.notes.mailkite_dbl = v;
+    next(); // unconditional: no DENY, no DENYSOFT, ever
+  };
+  if (!plugin.enabled || !txn) return note({ verdict: UNKNOWN, zone: null, canary: false });
+
+  // The HEADER From is what the reader sees and what the stored row keeps, so it is what we score
+  // — matching the Worker, which scores `messages.from_addr`. The envelope sender is a machine
+  // address (VERP, list bounce paths) and judging a domain by it would score the wrong party.
+  let domain = '';
+  try {
+    const raw = txn.header && txn.header.get('from');
+    const m = String(raw || '').match(/@([^\s>;,]+)/);
+    domain = m ? m[1].trim().toLowerCase().replace(/[.>]+$/, '') : '';
+  } catch { /* malformed header — nothing to score, and never a reason to refuse mail */ }
+  if (!domain) return note({ verdict: UNKNOWN, zone: null, canary: false });
+
+  plugin.dnsbl.checkDomain(domain).then((res) => {
+    if (res.verdict === 'listed') plugin.loginfo(`mailkite_spam: sender domain ${domain} listed in ${res.zone}`);
+    note(res);
+  }).catch((e) => {
+    plugin.logerror(`mailkite_spam: dbl check failed ${e.message}`);
     note({ verdict: UNKNOWN, zone: null, canary: false });
   });
 };

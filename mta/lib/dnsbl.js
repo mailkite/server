@@ -63,6 +63,50 @@ function classify(addrs, err) {
   return UNKNOWN;
 }
 
+/**
+ * Map a DOMAIN-zone (DBL) answer to listed | clean | unknown.
+ *
+ * The domain zone does NOT share the IP zone's return codes, and reusing `classify` here is a live
+ * false-positive bug: `8.8.8.8.dbl.spamhaus.org` answers **127.0.1.255** — "IP queries prohibited",
+ * an error — which `classify` reads as a listing because it matches 127.0.[012].x. A From domain
+ * that is an IP literal would then be flagged as spam on the strength of an error message.
+ *
+ *   127.0.1.2/4/5/6      → listed  (spam / phish / malware / botnet C&C domain)
+ *   127.0.1.10x          → listed  (ABUSED LEGIT domain — see below)
+ *   127.0.1.255          → unknown (we asked the wrong kind of question)
+ *   127.255.255.x        → unknown (refused, prohibited, over quota)
+ *   NXDOMAIN / ENODATA   → clean
+ *
+ * WHY "abused legit" (127.0.1.102–106) counts as listed: those are real domains that have been
+ * compromised and are currently serving spam/phishing. Spamhaus warns against BLOCKING on them,
+ * because the domain itself is legitimate — but we never block. We flag, into a folder the reader
+ * can overrule in one click, and mail from a domain that is right now being used to phish is
+ * exactly what that folder is for. If that trade ever needs revisiting, this is the one place.
+ */
+function classifyDomain(addrs, err) {
+  if (err) {
+    if (err.code === dns.NOTFOUND || err.code === 'ENOTFOUND' || err.code === 'ENODATA') return CLEAN;
+    return UNKNOWN;
+  }
+  if (!addrs || !addrs.length) return CLEAN;
+  if (addrs.some((a) => a.startsWith('127.255.255.'))) return UNKNOWN;
+  // 127.0.1.255 is an ERROR ("IP queries prohibited"), never a listing. Checked before the
+  // listing test below, which would otherwise swallow it.
+  if (addrs.some((a) => a === '127.0.1.255')) return UNKNOWN;
+  if (addrs.some((a) => /^127\.0\.1\.(?:[2456]|10[23456])$/.test(a))) return LISTED;
+  // Any other answer is a code we don't know, or DNS interception. Not a guess either way.
+  return UNKNOWN;
+}
+
+/** Is this something the domain zone can be asked about? Bare TLDs, IP literals and empty strings
+ *  are not — and an IP literal is exactly what earns the 127.0.1.255 error above. */
+function isQueryableDomain(d) {
+  const v = String(d || '').trim().toLowerCase();
+  if (!v || v.length > 253 || !v.includes('.')) return false;
+  if (isIpv4(v)) return false;
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(v);
+}
+
 /** Reverse an IPv4 for DNSBL query form: 1.2.3.4 → 4.3.2.1 */
 function reverseIp(ip) {
   return String(ip).split('.').reverse().join('.');
@@ -76,13 +120,14 @@ function isIpv4(ip) {
 
 /** Build a real DNS resolver bound to the configured servers/timeout. */
 function makeResolver(opts) {
+  const map = opts.classify || classify;
   return async (name) => {
     const resolver = new dns.promises.Resolver({ timeout: opts.timeoutMs, tries: 1 });
     if (opts.resolvers && opts.resolvers.length) resolver.setServers(opts.resolvers);
     try {
-      return classify(await resolver.resolve4(name), null);
+      return map(await resolver.resolve4(name), null);
     } catch (e) {
-      return classify(null, e);
+      return map(null, e);
     }
   };
 }
@@ -113,11 +158,20 @@ class Dnsbl {
     this.zoneIp = opts.zoneIp || 'zen.spamhaus.org';
     this.canaryListedIp = opts.canaryListedIp || '127.0.0.2'; // always listed in zen
     this.canaryCleanIp = opts.canaryCleanIp || '127.0.0.1';   // never listed in zen
+    // The DOMAIN zone is a separate list with separate return codes and its own canary point.
+    // Kept separate from the IP zone throughout so a broken/absent DBL can never disable the IP
+    // check, or vice versa — one refused zone should cost us one signal, not both.
+    this.zoneDomain = opts.zoneDomain || 'dbl.spamhaus.org';
+    this.canaryListedDomain = opts.canaryListedDomain || 'dbltest.com'; // always listed in dbl
     this.timeoutMs = Number(opts.timeoutMs) || 2000;
     this.resolvers = opts.resolvers || [];
     this.cacheTtlMs = Number(opts.cacheTtlMs) || 600000; // 10 min
     this.now = opts.now || (() => Date.now());
     this.lookup = opts.lookup || makeResolver({ resolvers: this.resolvers, timeoutMs: this.timeoutMs });
+    // Separate resolver binding because the two zones classify their answers DIFFERENTLY —
+    // sharing `lookup` is how 127.0.1.255 ("IP queries prohibited") would read as a listing.
+    this.lookupDomain = opts.lookupDomain
+      || makeResolver({ resolvers: this.resolvers, timeoutMs: this.timeoutMs, classify: classifyDomain });
     // ip → {verdict, at}. Only definitive verdicts are stored; caching an `unknown` would
     // pin a wrong answer for the process's life, which is how the original bug persisted.
     this.cache = new Map();
@@ -125,6 +179,8 @@ class Dnsbl {
     // time, so it is cached for the same TTL rather than re-probed on every SMTP connect.
     this.canaryAt = 0;
     this.canaryOk = false;
+    this.canaryDomainAt = 0;
+    this.canaryDomainOk = false;
   }
 
   /**
@@ -164,6 +220,49 @@ class Dnsbl {
       return out(UNKNOWN, false); // fail open — a blocklist must never break mail acceptance
     }
   }
+
+  /**
+   * Prove the DOMAIN zone is answering us. One probe: a test point that MUST be listed. There is
+   * no documented never-listed domain to pair it with (any name we picked could get listed
+   * tomorrow and turn the canary into a false alarm), so this arm is one-sided by necessity —
+   * which is fine, because the failure it has to catch is "we are being refused", and a refusal
+   * makes the listed probe come back not-listed.
+   */
+  async canaryDomain() {
+    if (this.canaryDomainAt && this.now() - this.canaryDomainAt < this.cacheTtlMs) return this.canaryDomainOk;
+    const listed = await this.lookupDomain(`${this.canaryListedDomain}.${this.zoneDomain}`);
+    this.canaryDomainOk = listed === LISTED;
+    this.canaryDomainAt = this.now();
+    return this.canaryDomainOk;
+  }
+
+  /**
+   * Look one SENDER DOMAIN up in the domain zone. Never throws.
+   *
+   * This is the signal an IP lookup can't give us after the fact: the connecting IP lives only in
+   * the SMTP session, but the domain is IN the message — so the same check runs live at the edge
+   * and retroactively over stored mail, and the two can't drift.
+   *
+   * @returns {Promise<{verdict:'listed'|'clean'|'unknown', zone:string, canary:boolean}>}
+   */
+  async checkDomain(domain) {
+    const out = (verdict, canary) => ({ verdict, zone: this.zoneDomain, canary: !!canary });
+    try {
+      const d = String(domain || '').trim().toLowerCase();
+      if (!isQueryableDomain(d)) return out(UNKNOWN, false);
+      const key = `d:${d}`;
+      const hit = this.cache.get(key);
+      if (hit && this.now() - hit.at < this.cacheTtlMs) return out(hit.verdict, true);
+
+      if (!(await this.canaryDomain())) return out(UNKNOWN, false);
+
+      const verdict = await this.lookupDomain(`${d}.${this.zoneDomain}`);
+      if (verdict === LISTED || verdict === CLEAN) this.cache.set(key, { verdict, at: this.now() });
+      return out(verdict, true);
+    } catch {
+      return out(UNKNOWN, false);
+    }
+  }
 }
 
-module.exports = { Dnsbl, classify, reverseIp, isIpv4, LISTED, CLEAN, UNKNOWN };
+module.exports = { Dnsbl, classify, classifyDomain, isQueryableDomain, reverseIp, isIpv4, LISTED, CLEAN, UNKNOWN };
