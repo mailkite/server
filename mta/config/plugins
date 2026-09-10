@@ -7,8 +7,12 @@
 mailkite_rcpt
 
 # Edge verdicts → emitted as x-mailkite-* headers by mailkite_ingest, stored by the
-# Worker. SPF + DKIM verify run standalone (no daemon). DMARC has no bundled plugin
-# (derived later). rspamd needs a running rspamd daemon — enable in prod once available.
+# Worker. SPF + DKIM verify run standalone (no daemon). DMARC has no bundled plugin and is
+# now DERIVED IN THE WORKER instead — api/src/lib/dmarc.ts, off the Authentication-Results
+# header these two plugins write (that header is the only place a result keeps the identity
+# it is about, which is what alignment needs). If a DMARC plugin is ever enabled here, its
+# x-mailkite-dmarc header takes precedence and the Worker's derivation stands down.
+# rspamd needs a running rspamd daemon — enable in prod once available.
 spf
 dkim
 #rspamd
