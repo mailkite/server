@@ -80,9 +80,28 @@ exports.hook_queue = function (next, connection) {
 exports.read_verdicts = function (connection, txn) {
   const v = {};
   try {
-    // SPF: the MAIL FROM result is stashed on txn.notes by haraka-plugin-spf.
-    const spf = txn?.notes?.spf_mail_result ?? connection?.notes?.spf_helo;
-    if (spf) v.spf = String(spf).toLowerCase();
+    // SPF for the MAIL FROM identity — a WORD ('Pass', 'SoftFail', …), lowercased here because
+    // that is the vocabulary the Worker's scorer and the published `auth.spf` contract use.
+    //
+    // DO NOT FALL BACK TO connection.notes.spf_helo. That used to be here and it was wrong twice
+    // over:
+    //
+    //   TYPE — spf_helo is haraka-plugin-spf's NUMERIC enum (1=None, 2=Pass, 3=Fail, 4=SoftFail,
+    //   5=Neutral, 6=TempError, 7=PermError), not a result word. It landed in the same column as
+    //   the strings, so `messages.spf` grew mixed types: 24,386 stored rows across 6 accounts
+    //   read '1'/'2'/'3'. Consumers got `auth.spf: "2"`, and the scorer — which compares against
+    //   'fail'/'softfail' — silently matched none of them, so SPF contributed nothing at all for
+    //   that mail.
+    //
+    //   IDENTITY — HELO and MAIL FROM are DIFFERENT identities (RFC 7208 §2.3), and a HELO result
+    //   answers a question nobody asked here. A HELO 'None' is unremarkable and says nothing about
+    //   the envelope sender, but stored as `spf` it reads as "we checked SPF and got None". The
+    //   silent substitution meant a value's MEANING changed with no way for any reader to tell.
+    //
+    // Absent is now absent: no MAIL FROM result → `spf` stays null → the scorer reads "not
+    // checked", which is true, instead of an authentication claim we never made.
+    const spf = txn?.notes?.spf_mail_result;
+    if (typeof spf === 'string' && spf.trim()) v.spf = spf.trim().toLowerCase();
   } catch { /* ignore */ }
   try {
     // DKIM: ResultStore entry has .pass (domain) or .fail.
@@ -102,6 +121,26 @@ exports.read_verdicts = function (connection, txn) {
     if (rspamd) {
       if (rspamd.score !== undefined && rspamd.score !== null) v.spam = String(rspamd.score);
       if (rspamd.action) v.spamVerdict = String(rspamd.action);
+    }
+  } catch { /* ignore */ }
+  try {
+    // DNSBL on the connecting IP, from our own mailkite_spam plugin (connect hook).
+    // Tri-state: listed | clean | unknown, where `unknown` is NEVER `clean` — see
+    // lib/dnsbl.js. Only a canary-verified verdict is forwarded; an unproven one is
+    // indistinguishable from "we didn't check", which is exactly what the Worker must
+    // read it as. The IP rides along so the Worker can record WHAT was scored.
+    const bl = connection?.notes?.mailkite_dnsbl;
+    if (bl && bl.canary && (bl.verdict === 'listed' || bl.verdict === 'clean')) {
+      v.dnsbl = bl.verdict;
+      if (bl.zone) v.dnsblZone = bl.zone;
+    }
+    const ip = connection?.remote?.ip;
+    if (ip) v.remoteIp = String(ip);
+    // Sender-domain blocklist (mailkite_spam data_post hook). Same canary rule as the IP zone:
+    // an unproven verdict is indistinguishable from "we didn't check", so it isn't forwarded.
+    const dbl = txn?.notes?.mailkite_dbl;
+    if (dbl && dbl.canary && (dbl.verdict === 'listed' || dbl.verdict === 'clean')) {
+      v.dbl = dbl.verdict;
     }
   } catch { /* ignore */ }
   return v;
@@ -187,6 +226,11 @@ exports.post_to_ingest = function (connection, txn, raw, next) {
     if (verdicts.dmarc) headers['x-mailkite-dmarc'] = verdicts.dmarc;
     if (verdicts.spam) headers['x-mailkite-spam'] = verdicts.spam;
     if (verdicts.spamVerdict) headers['x-mailkite-spam-verdict'] = verdicts.spamVerdict;
+    // Inbound spam SIGNALS (never a verdict the edge acted on) — the Worker scores them.
+    if (verdicts.dnsbl) headers['x-mailkite-dnsbl'] = verdicts.dnsbl;
+    if (verdicts.dnsblZone) headers['x-mailkite-dnsbl-zone'] = verdicts.dnsblZone;
+    if (verdicts.dbl) headers['x-mailkite-dbl'] = verdicts.dbl;
+    if (verdicts.remoteIp) headers['x-mailkite-remote-ip'] = verdicts.remoteIp;
 
     return fetch(t.url, { method: 'POST', headers, body: raw }).then((res) => {
       if (res.ok) {
