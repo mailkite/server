@@ -14,8 +14,8 @@ a human, because a template can only be created from a Railway workspace.
 
 1. **Workspace → Templates → New Template.**
 2. **Add service → GitHub repo** → `https://github.com/mailkite/server` (branch `main`).
-   `railway.json` at the repo root selects `api-local/Dockerfile` and health-checks `/` — do not set
-   the Dockerfile path by hand.
+   `railway.json` at the repo root selects `api-local/Dockerfile` and health-checks `/api/health` — do not
+   set the Dockerfile path by hand.
 3. **Variables** (Settings → Variables). Add exactly these:
 
    | Variable | Value | Notes |
@@ -31,7 +31,8 @@ a human, because a template can only be created from a Railway workspace.
    without it, a redeploy wipes every message. `railway.json` sets `requiredMountPath: "/data"`,
    so a deploy without the volume fails loudly instead of booting on ephemeral disk.
 5. **Networking → Generate domain** (HTTP). The service listens on `$PORT`, which Railway injects.
-6. **Healthcheck path:** `/` (already in `railway.json`), timeout 120s.
+6. **Healthcheck path:** `/api/health` (already in `railway.json`), timeout 120s. It answers from
+   SQLite and reports the data dir, so a missing volume fails the check rather than passing on the SPA.
 7. **Replicas: 1.** SQLite is single-writer; `railway.json` already pins `numReplicas: 1` and
    `sleepApplication: false` (a sleeping container delays inbound webhooks).
 8. **Publish**, then paste the template URL into `deploy/railway.md` and the marketing pages.

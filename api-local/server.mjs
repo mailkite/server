@@ -1299,6 +1299,19 @@ Object.assign(routes, {
 
   // Account-wide message list across INBOX + Sent, newest first — the receive half of
   // the developer API. Returns a bare array (like the cloud); page with before=received_at.
+  // Readiness for orchestrators (Railway, Fly, compose). A check on `/` only proves the SPA file
+  // exists — it passes even when the database never opened. This answers from the store, which is
+  // the thing a SQLite-backed service actually fails at, and says where the state lives so a
+  // missing volume is visible in one request.
+  'GET /api/health': async (req, res) => {
+    try {
+      const row = store.db.prepare('SELECT COUNT(*) AS n FROM messages').get();
+      return json(res, 200, { ok: true, dataDir: store.dataDir, messages: Number(row?.n ?? 0) });
+    } catch (e) {
+      return json(res, 503, { ok: false, error: String(e?.message ?? e) });
+    }
+  },
+
   'GET /api/messages': async (req, res) => {
     const userId = apiKeyUser(req);
     if (userId == null) return json(res, 401, { error: 'invalid API key', code: 'bad_key' });

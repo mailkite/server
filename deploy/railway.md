@@ -7,7 +7,7 @@
 -->
 
 Deploys `api-local` + the built web console as one HTTP service with SQLite on a Railway
-volume. `railway.json` at the repo root selects the Dockerfile and health-checks `/`, so
+volume. `railway.json` at the repo root selects the Dockerfile and health-checks `/api/health`, so
 "Deploy from GitHub repo" needs no build configuration.
 
 > **What Railway can and cannot run.** Railway cannot host the mail edges: port 25 inbound
