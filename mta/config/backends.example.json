@@ -1,0 +1,6 @@
+{
+  "backends": [
+    { "name": "cloud", "url": "https://api.mailkite.dev", "secretEnv": "MAILKITE_HMAC_SECRET" },
+    { "name": "local", "url": "https://mail.internal.example", "secretEnv": "LOCAL_HMAC_SECRET" }
+  ]
+}

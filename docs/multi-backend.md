@@ -56,6 +56,63 @@ Without `config/backends.json`, behavior is **byte-identical to single-backend m
   already content-addressed. Cross-backend recipient mixes are rare in practice (one
   message addressed to two different organizations' domains at the same MX).
 
+## Add a backend
+
+Adding one does not touch the others. Do these in order:
+
+1. **Implement the two endpoints.** The new backend serves
+   `GET /api/mx/accepted-domains` and `POST /api/ingest` as specified in
+   [`contract.md`](./contract.md). Both require its own secret; neither reads another
+   backend's state.
+2. **Create a dedicated secret.** Generate a new HMAC secret for this backend only, and
+   put it in the edge's environment (for the reference deployment, the
+   `mailkite-mta` unit's environment file — never in `backends.json` or the repo).
+3. **Append the entry.** Add `{name, url, secretEnv}` to `config/backends.json` **after**
+   the existing entries. Order is priority, so appending means the new backend can never
+   shadow an existing one. A starting point ships in
+   `mta/config/backends.example.json`.
+4. **Restart the edge.** The router is built at plugin registration. A restart briefly
+   tempfails new connections; connected senders retry, and queued mail is unaffected.
+5. **Verify before announcing the domain** (next section).
+
+## Verify the routing
+
+Check the backend's claim list directly, then check what the edge does with it:
+
+```sh
+# 1. The backend answers with only its own domains.
+curl -fsS -H "Authorization: Bearer $NEW_BACKEND_SECRET" \
+  https://new-backend.example.com/api/mx/accepted-domains
+
+# 2. The edge accepts a recipient the new backend claims.
+swaks --to test@new-domain.example --server mx.example.com
+
+# 3. The edge rejects a domain nobody claims (anti-open-relay).
+swaks --to test@unclaimed.example --server mx.example.com
+```
+
+The edge logs one line per successful refresh:
+
+```text
+backends: new-backend: refreshed 1 accepted domain(s)
+```
+
+For an end-to-end check, send a real message to an address on a domain **only** the new
+backend claims, and confirm the message is durable in that backend before the edge
+returned `250`. Then confirm an address on an existing backend still lands in its
+original store — the add is only correct if both directions hold.
+
+## Failure modes
+
+| Symptom | Cause | What the edge does |
+|---|---|---|
+| One backend's domains are rejected at RCPT | Its `secretEnv` is unset, so the entry was skipped at startup | Logs `env <NAME> is unset/empty — backend skipped`; every other backend keeps serving |
+| A domain is rejected but its backend is up | The backend's accepted-domains list does not include it yet | `DENY` — the backend must claim the domain before the edge will accept it |
+| A domain tempfails while other domains work | That backend is cold and unreachable | `DENYSOFT` for that domain only; other backends are unaffected |
+| Every domain tempfails on a cold edge | No backend has produced a list yet | `DENYSOFT` rather than a bounce, because an unqueried backend may own the domain |
+| A message is accepted twice by one backend | A partial ingest failure made the sender retry | Expected; backends must dedupe on recipient + content hash (the reference backend does) |
+| Log line `CONFLICT — 2 backends claim <domain>` | Two claim lists overlap | The earlier entry wins; the warning is emitted once per domain |
+
 ## Security notes
 
 - A backend can only ever *claim domains*; priority order means a lower-priority backend

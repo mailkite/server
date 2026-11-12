@@ -68,7 +68,8 @@ prefer DNS-01 so nothing needs port 80 and renewals don't require downtime). Add
 
 One MX can serve several backends at once — each recipient domain is routed to the
 backend that claims it (spec: [`../docs/multi-backend.md`](../docs/multi-backend.md)).
-Drop a `config/backends.json` (order = priority; secrets stay in env):
+Copy [`config/backends.example.json`](config/backends.example.json) to
+`config/backends.json` (order = priority; secrets stay in env) and adjust it:
 
 ```json
 {
@@ -80,7 +81,9 @@ Drop a `config/backends.json` (order = priority; secrets stay in env):
 ```
 
 Without the file, behavior is identical to single-backend mode below. Routing logic
-lives in `lib/backends.js`; `npm test` covers it without installing Haraka.
+lives in `lib/backends.js`; `npm test` covers it without installing Haraka. After a
+restart, confirm one claimed and one unclaimed domain with the checks in the spec's
+[Verify the routing](../docs/multi-backend.md#verify-the-routing) section.
 
 ## Secrets & config
 

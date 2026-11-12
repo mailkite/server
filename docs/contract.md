@@ -60,6 +60,10 @@ Called by `mta/plugins/mailkite_rcpt.js` (live, cached ~30 s) and
 - **Response:** `{"domains": ["example.com", ...]}` — every domain the backend will
   accept inbound mail for. The edge DENYs RCPTs outside this set.
 
+In multi-backend mode every backend exposes this endpoint. The edge accepts a domain if
+*any* backend claims it, records the owner, and sends that backend's ingest only its own
+recipients — see [`multi-backend.md`](./multi-backend.md).
+
 ---
 
 ## Outbound
