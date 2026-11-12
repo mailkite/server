@@ -1331,7 +1331,13 @@ const UI_DIR = process.env.UI_DIR || new URL('../ui/dist', import.meta.url).path
 const MIME = { html: 'text/html', js: 'text/javascript', css: 'text/css', svg: 'image/svg+xml', png: 'image/png', ico: 'image/x-icon', woff2: 'font/woff2', json: 'application/json' };
 function serveUi(req, res) {
   if (req.method !== 'GET' || !existsFs(UI_DIR)) return false;
-  const pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  } catch {
+    // Malformed percent-encoding (scanners, truncated links). Not a UI request.
+    return false;
+  }
   const safe = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
   let file = joinPath(UI_DIR, safe === '/' ? 'index.html' : safe);
   if (!file.startsWith(UI_DIR)) return false;
@@ -1484,7 +1490,7 @@ const PARAM_ROUTES = [
   },
 ];
 
-const handle = async (req, res) => {
+const handleInner = async (req, res) => {
   setCorsHeaders(res);
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -1510,6 +1516,20 @@ const handle = async (req, res) => {
   } catch (e) {
     json(res, e.status || 500, { error: e.message });
   }
+};
+
+// The front door is public, so a malformed URL or a scanner probe must answer with an
+// error response — never an unhandled rejection that kills the process. A single
+// `GET /%` took the hosted reference backend down for three days on 2026-11-09.
+const handle = (req, res) => {
+  handleInner(req, res).catch((e) => {
+    if (res.headersSent) return res.destroy(e);
+    try {
+      json(res, e instanceof URIError ? 400 : (e.status || 500), { error: e.message });
+    } catch {
+      res.destroy(e);
+    }
+  });
 };
 
 // Native TLS (optional): set TLS_CERT + TLS_KEY to serve HTTPS directly — no reverse
