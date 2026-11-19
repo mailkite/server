@@ -1,13 +1,41 @@
 # MailKite Server
 
 **An open-source, programmable mail server for apps and AI agents.**
-Haraka-based SMTP (MX + submission) and a thin IMAP head, designed around one small HTTP
-backend contract — run it fully self-hosted, or point the same components at
-[MailKite Cloud](https://mailkite.dev) and skip the ops.
+Haraka SMTP (MX + submission) and a thin IMAP head, wrapped around one small HTTP backend
+contract. Run the whole thing on your own box.
 
-> Status: **pre-1.0.** The SMTP/IMAP edges here run MailKite's production mail; the
-> reference SQLite backend and web console are new (first public release 2026-08-01,
-> now v0.5.0) and pass the conformance + end-to-end suites.
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-6ea8fe)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522.5-7c6cff)](https://nodejs.org)
+[![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-f5b544)](#status)
+[![CI](https://github.com/mailkite/server/actions/workflows/ci.yml/badge.svg)](https://github.com/mailkite/server/actions/workflows/ci.yml)
+
+## Run it
+
+```sh
+git clone https://github.com/mailkite/server && cd server
+cp .env.example .env          # then set HMAC_SECRET: openssl rand -hex 32
+docker compose up -d          # backend + web console on http://localhost:8787
+```
+
+That is the whole install: a Node + SQLite backend, a React console, and a bearer-token API
+on `POST /v1/send` / `GET /api/messages`. No account, no key, no cloud dependency.
+
+Add the SMTP edge when you want inbound mail — this is the part that needs a public IP,
+port 25, a PTR record and TLS material:
+
+```sh
+docker compose --profile edges up    # + Haraka MX on :25
+```
+
+Prebuilt images publish to `ghcr.io/mailkite/server` from the release tags, so you can skip
+the build entirely:
+
+```sh
+docker run -d -p 8787:8787 -e HMAC_SECRET=$(openssl rand -hex 32) \
+  -v mail-data:/data ghcr.io/mailkite/server:v0.5.0
+```
+
+Point an existing Resend-style SDK at your own base URL and it works unchanged.
 
 ## What's in the box
 
@@ -16,8 +44,8 @@ backend contract — run it fully self-hosted, or point the same components at
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), smarthost outbound (`SMARTHOST=cloud` or any SMTP relay), and the [developer API](docs/v1.md) — the same `POST /v1/send` + `GET /api/messages` JSON surface as MailKite Cloud, so SDKs point at your server instead of `api.mailkite.dev` |
-| [`ui/`](ui/) | Web console for domains, DNS records, message log, routes, webhooks, and credentials — magic-link sign-in, pluggable providers (local or MailKite Cloud) |
+| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), smarthost outbound, and the [developer API](docs/v1.md) |
+| [`ui/`](ui/) | Web console for domains, DNS records, message log, routes, webhooks, and credentials — magic-link sign-in, pluggable providers |
 
 ### Routes — do something with the mail
 
@@ -40,31 +68,55 @@ per-route rate cap yet).
 Every component is a dumb protocol head. State lives behind a handful of HMAC-authenticated
 HTTP endpoints (`/api/imap/{auth,status,list,flags,raw}`, an inbound ingest hook, and a
 submission inject endpoint). Implement that contract over any store and every edge here
-works unchanged — the reference SQLite backend and MailKite Cloud are just two
-implementations of it. One MX edge can even serve **several backends at once**, routing
-each recipient domain to its owner — see [`docs/multi-backend.md`](docs/multi-backend.md).
+works unchanged — the reference SQLite backend is just the default implementation of it.
+One MX edge can even serve **several backends at once**, routing each recipient domain to
+its owner — see [`docs/multi-backend.md`](docs/multi-backend.md).
 Opt in with `config/backends.json` (example: `mta/config/backends.example.json`); without
 it the edge is single-backend.
-See [`docs/contract.md`](docs/contract.md) and [`docs/app-passwords.md`](docs/app-passwords.md)
-(mailbox credentials: one domain, an address pattern, IMAP and/or API access); the conformance suite
-in `api-local/test/` is its executable form, and `scripts/e2e-imap.mjs` proves the
-full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
 
-## Self-hosting
+See [`docs/contract.md`](docs/contract.md) and [`docs/app-passwords.md`](docs/app-passwords.md)
+(mailbox credentials: one domain, an address pattern, IMAP and/or API access); the
+conformance suite in `api-local/test/` is its executable form, and `scripts/e2e-imap.mjs`
+proves the full stack (signed ingest → backend → the real IMAP daemon → a TLS IMAP client).
+
+## Deploying
 
 **Runs on any Node ≥ 22.5 host** — VPS (systemd), Docker, Fly.io, Railway. Serverless
 (Workers/Vercel) is intentionally out of scope: those runtimes can't hold SQLite state or
-raw-TCP mail ports, and the hosted backend for that style is MailKite Cloud.
+raw-TCP mail ports.
 
-- Quick start: `docker compose up -d` → backend + web console on `:8787`
-  ([`compose.yaml`](compose.yaml); `--profile edges` adds the MX edge)
-- Hosted: [`deploy/fly.md`](deploy/fly.md) · [`deploy/railway.md`](deploy/railway.md)
+- Docker: [`compose.yaml`](compose.yaml) — `docker compose up -d`; `--profile edges` adds the MX edge
+- Fly.io: [`deploy/fly.md`](deploy/fly.md) · Railway: [`deploy/railway.md`](deploy/railway.md)
 - Bare VPS (full mail stack incl. IMAP/submission): [`docs/self-hosting.md`](docs/self-hosting.md)
   — DNS records, TLS provisioning, and systemd units. Short version: one VPS, three
   daemons, your backend URL in one env var.
 
-Don't want to run mail infrastructure? [MailKite Cloud](https://mailkite.dev) is the hosted
-backend + dashboard, with deliverability, retention, and support handled for you.
+## Documentation
+
+| Doc | Read it when |
+|---|---|
+| [`docs/self-hosting.md`](docs/self-hosting.md) | Running the full stack on a VPS — DNS, TLS, systemd |
+| [`docs/contract.md`](docs/contract.md) | Writing your own backend instead of using `api-local` |
+| [`docs/routes.md`](docs/routes.md) | Wiring webhook, forward, or AI-agent rules to an address |
+| [`docs/v1.md`](docs/v1.md) | Calling the developer API (`POST /v1/send`) |
+| [`docs/multi-backend.md`](docs/multi-backend.md) | One MX serving several backends, one per domain |
+| [`docs/app-passwords.md`](docs/app-passwords.md) | Mailbox credentials for IMAP and API access |
+| [`docs/auth-setup.md`](docs/auth-setup.md) | Magic-link sign-in and OAuth for the console |
+
+## Status
+
+**Pre-1.0, and deliberately honest about it.** The SMTP and IMAP edges here carry MailKite's
+production mail; the reference SQLite backend and web console are newer (first public
+release 2026-08-01, now v0.5.0) and pass the conformance + end-to-end suites in CI. Where a
+piece is unproven, [`docs/`](docs/) says so rather than implying otherwise. The contract is
+the stable part; the reference backend is the part still settling.
+
+## Hosted alternative
+
+If you would rather not run mail infrastructure — DNS, PTR, TLS renewal, deliverability,
+retention — [MailKite Cloud](https://mailkite.dev) is the hosted backend and dashboard. It
+consumes this same repository as a pinned submodule, so self-hosted and hosted stay in
+lockstep. It is an option, not a dependency: nothing here requires an account.
 
 ## License
 
