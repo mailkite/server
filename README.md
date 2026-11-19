@@ -4,6 +4,8 @@
 Haraka SMTP (MX + submission) and a thin IMAP head, wrapped around one small HTTP backend
 contract. Run the whole thing on your own box.
 
+![One core — the backend contract — with three protocol heads around it: an inbound MX intake, a reading slot, an outbound emitter](brand-assets/readme-hero.png)
+
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-6ea8fe)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%E2%89%A522.5-7c6cff)](https://nodejs.org)
 [![Status: pre-1.0](https://img.shields.io/badge/status-pre--1.0-f5b544)](#status)
