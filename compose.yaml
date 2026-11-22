@@ -18,6 +18,16 @@ services:
     environment:
       # Shared edge<->backend secret. Generate one: openssl rand -hex 32
       HMAC_SECRET: ${HMAC_SECRET:?set HMAC_SECRET in .env}
+      # Outbound is optional — see api-local/README.md § Outbound (smarthost).
+      #   SMARTHOST=ses    + SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY (+ SES_REGION)
+      #   SMARTHOST=cloud  + MAILKITE_SEND_KEY
+      #   SMARTHOST=smtp://user:pass@host:587
+      SMARTHOST: ${SMARTHOST:-}
+      MAILKITE_SEND_KEY: ${MAILKITE_SEND_KEY:-}
+      SES_ACCESS_KEY_ID: ${SES_ACCESS_KEY_ID:-}
+      SES_SECRET_ACCESS_KEY: ${SES_SECRET_ACCESS_KEY:-}
+      SES_SESSION_TOKEN: ${SES_SESSION_TOKEN:-}
+      SES_REGION: ${SES_REGION:-}
     volumes:
       - mail-data:/data
     restart: unless-stopped

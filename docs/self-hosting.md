@@ -38,10 +38,48 @@ Each daemon reads its secrets from the environment only — nothing secret lives
 |---|---|---|
 | `MAILKITE_API_URL` | all | base URL of your backend (local backend or `https://api.mailkite.dev`) |
 | `MAILKITE_HMAC_SECRET` | all | shared secret for backend calls (Bearer/HMAC) |
+| `SMARTHOST` + credential | api-local | where external mail leaves: `cloud` (+ `MAILKITE_SEND_KEY`), `ses` (+ `SES_ACCESS_KEY_ID`/`SES_SECRET_ACCESS_KEY`), or `smtp[s]://…`. See [`api-local/README.md`](../api-local/README.md) § Outbound |
 | `IMAP_PORT` / `IMAP_HOST` | imap | defaults `993` / `::` |
 | `TLS_CERT` / `TLS_KEY` | imap | PEM paths |
 
 Put them in `/etc/mailkite/<component>.env` and reference from the systemd units.
+
+## Outbound (sending)
+
+Receiving needs the MX edge; sending to the outside world needs a smarthost. It is one
+variable with three options — the full matrix is in
+[`api-local/README.md`](../api-local/README.md) § Outbound.
+
+| `SMARTHOST` | Credential | What it does |
+|---|---|---|
+| `cloud` | `MAILKITE_SEND_KEY=mk_live_…` | hands the message to MailKite Cloud, which sends with managed IP reputation |
+| `ses` · `ses://<region>` | `SES_ACCESS_KEY_ID` + `SES_SECRET_ACCESS_KEY` | calls Amazon SES `SendRawEmail`, signed with your ordinary AWS access key pair over HTTPS 443 |
+| `smtp[s]://user:pass@host:port` | in the URL | relays through any SMTP server that accepts AUTH over TLS |
+
+SES is the option for a box that already pays AWS — and for a host that blocks outbound
+SMTP (Railway, most serverless platforms): the request is HTTPS 443, there is no derived
+SMTP username/password to generate, and nothing else to install. Three things stay yours:
+
+1. **Verify the From domain (or address) in SES and enable Easy DKIM.** This backend does
+   not DKIM-sign; without Easy DKIM the message goes out unsigned or under
+   `d=amazonses.com` and fails alignment at the receiver.
+2. **Leave the SES sandbox**, or only verified recipients receive mail.
+3. **Grant the IAM user `ses:SendRawEmail`** and nothing more.
+
+```sh
+# /etc/mailkite/api-local.env
+SMARTHOST=ses
+SES_ACCESS_KEY_ID=AKIA…
+SES_SECRET_ACCESS_KEY=…
+SES_REGION=us-east-1          # or use SMARTHOST=ses://eu-west-1
+```
+
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` work as fallbacks, so a
+machine that already has AWS credentials in its environment needs only `SMARTHOST=ses`.
+A bad configuration is reported at boot and outbound stays disabled rather than failing
+message by message.
+
+Design record, semantics and the SES error → fix table: [`ses-outbound.md`](ses-outbound.md).
 
 ## 4. TLS
 

@@ -39,6 +39,19 @@ docker run -d -p 8787:8787 -e HMAC_SECRET=$(openssl rand -hex 32) \
 
 Point an existing Resend-style SDK at your own base URL and it works unchanged.
 
+## Or hand it to an agent
+
+The repo ships a setup skill — the same runbook, written for a coding agent. Paste this
+into Claude Code, Codex, Cursor, or any agent with shell access:
+
+> Read https://raw.githubusercontent.com/mailkite/server/main/skills/mailkite-server-setup/SKILL.md
+> and set up MailKite Server on this machine. Ask me for the domain and who controls DNS
+> before changing anything, then tell me which outbound path you picked and why.
+
+It walks the agent through the stack, DNS and domain verification, inbound, and choosing
+an outbound path — Amazon SES, MailKite Cloud, or any SMTP relay. Source:
+[`skills/mailkite-server-setup/SKILL.md`](skills/mailkite-server-setup/SKILL.md).
+
 ## What's in the box
 
 | Component | What it is |
@@ -46,7 +59,7 @@ Point an existing Resend-style SDK at your own base URL and it works unchanged.
 | [`mta/`](mta/) | Inbound MX edge — [Haraka](https://haraka.github.io/) + plugins that POST accepted mail to your backend as a webhook, with live anti-open-relay recipient checks |
 | [`mta-submit/`](mta-submit/) | Submission edge (587/465) — authenticated send with DKIM signing, relayed through your backend |
 | [`imap/`](imap/) | IMAP4 head (993, implicit TLS) — a stateless protocol daemon on `imap-core`; all storage lives behind the backend contract |
-| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), smarthost outbound, and the [developer API](docs/v1.md) |
+| [`api-local/`](api-local/) | Reference REST API: Node + SQLite + file blobs implementing the contract below — zero npm dependencies. Inbound webhooks with signing + retries, [routes](docs/routes.md), smarthost outbound (MailKite Cloud, [Amazon SES by API key](docs/ses-outbound.md), or any SMTP relay), and the [developer API](docs/v1.md) |
 | [`ui/`](ui/) | Web console for domains, DNS records, message log, routes, webhooks, and credentials — magic-link sign-in, pluggable providers |
 
 ### Routes — do something with the mail

@@ -38,8 +38,9 @@ Publisher checklist: [`deploy/railway-template.md`](railway-template.md).
    - `HOST=0.0.0.0` (already the image default)
    - `DATA_DIR=/data` (already the image default; must match the volume)
    - Railway injects `PORT` automatically and the server honors it; no override needed
-   - Optional: `SMARTHOST` (`cloud` or `smtp://user:pass@host:587`), `MAILKITE_SEND_KEY`
-     (needed for `SMARTHOST=cloud`), `ADMIN_EMAIL`, `MESSAGE_ID_HOST`, `CORS_ORIGIN`
+   - Optional: `SMARTHOST` (`cloud`, `ses`, or `smtp://user:pass@host:587`), `MAILKITE_SEND_KEY`
+     (needed for `SMARTHOST=cloud`), `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY`
+     (needed for `SMARTHOST=ses`), `ADMIN_EMAIL`, `MESSAGE_ID_HOST`, `CORS_ORIGIN`
 5. **Networking:** generate a public domain for the service.
 6. **Replicas: 1**, and the volume is mandatory: `railway.json` pins `numReplicas: 1`,
    disables sleep, and sets `requiredMountPath: "/data"` so a deploy without the volume fails
@@ -50,14 +51,16 @@ Open the domain and paste `HMAC_SECRET` into the console's Connect screen.
 ## Sending and receiving
 
 - **Outbound** — `SMARTHOST=cloud MAILKITE_SEND_KEY=mk_live_…` sends through MailKite Cloud
-  (the cloud still applies its own From-domain verification), or point `SMARTHOST` at any
-  SMTP relay. Without a smarthost, external recipients are skipped and logged.
+  (the cloud still applies its own From-domain verification), `SMARTHOST=ses` +
+  `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY` sends through Amazon SES's API, or point
+  `SMARTHOST` at any SMTP relay. Without a smarthost, external recipients are skipped and logged.
 - **Inbound** — an edge delivers `/api/ingest` to this backend. Set the edge's
   `MAILKITE_API_URL=https://<your-railway-domain>` and the same `HMAC_SECRET`.
 
 **Constraints:** single replica only; the volume is the database — include it in your backup
-plan. Railway also blocks outbound SMTP unless you are on the Pro plan, so `SMARTHOST` must be
-an HTTPS API (`cloud`) or a relay reachable on Pro.
+plan. Railway blocks outbound SMTP unless you are on the Pro plan, so the outbound path here
+must be HTTPS: `SMARTHOST=cloud` or `SMARTHOST=ses` (SES credentials are the ordinary AWS
+access key pair, not SMTP credentials). A `smtp://` relay needs Pro.
 
 ## Verified
 

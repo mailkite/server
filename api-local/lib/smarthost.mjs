@@ -6,18 +6,21 @@
 // solves that:
 //
 //   SMARTHOST=cloud                          → POST to MailKite Cloud's /api/relay
+//   SMARTHOST=ses                            → Amazon SES SendRawEmail, signed with an
+//   SMARTHOST=ses://eu-west-1                  AWS access key pair (see ses.mjs)
 //   SMARTHOST=smtp://user:pass@host:587      → relay to any SMTP smarthost (STARTTLS)
 //   SMARTHOST=smtps://user:pass@host:465     → implicit TLS
 //   (unset)                                  → external recipients are skipped + logged
 //
-// Zero npm deps: node:net + node:tls only.
+// Zero npm deps: node:net + node:tls + node:crypto only.
 
 import { connect as netConnect } from 'node:net';
 import { connect as tlsConnect } from 'node:tls';
+import { parseSesConfig, relayViaSes } from './ses.mjs';
 
 const CLOUD_RELAY = process.env.MAILKITE_CLOUD_RELAY || 'https://api.mailkite.dev/api/relay';
 
-/** Parse SMARTHOST (+ MAILKITE_SEND_KEY) into a config, or null when unset/invalid. */
+/** Parse SMARTHOST (+ credentials) into a config, or null when unset/invalid. */
 export function parseSmarthost(env = process.env) {
   const spec = (env.SMARTHOST || '').trim();
   if (!spec) return null;
@@ -28,10 +31,15 @@ export function parseSmarthost(env = process.env) {
     }
     return { mode: 'cloud', sendKey: env.MAILKITE_SEND_KEY, url: env.MAILKITE_CLOUD_RELAY || CLOUD_RELAY };
   }
+  // `ses` or `ses://<region>` — credentials and region come from the environment
+  // (SES_* with the standard AWS_* names as fallback), never from the spec string.
+  if (spec === 'ses' || spec.startsWith('ses://')) {
+    return parseSesConfig(env, spec === 'ses' ? '' : spec.slice('ses://'.length));
+  }
   let u;
   try { u = new URL(spec); } catch { console.error(`smarthost: unparseable SMARTHOST "${spec}" — outbound disabled`); return null; }
   if (u.protocol !== 'smtp:' && u.protocol !== 'smtps:') {
-    console.error(`smarthost: unsupported scheme "${u.protocol}" (want cloud, smtp://, smtps://) — outbound disabled`);
+    console.error(`smarthost: unsupported scheme "${u.protocol}" (want cloud, ses, smtp://, smtps://) — outbound disabled`);
     return null;
   }
   const implicitTls = u.protocol === 'smtps:';
@@ -249,8 +257,22 @@ export async function sendViaSmtp(cfg, { from, to, subject, text }) {
  */
 export async function relayExternal(cfg, raw, rcpts, mailfrom) {
   if (!cfg || !rcpts.length) return { mode: cfg ? cfg.mode : null, relayed: 0 };
-  const relayed = cfg.mode === 'cloud'
-    ? await relayViaCloud(cfg, raw, rcpts)
-    : await relayViaSmtp(cfg, raw, rcpts, mailfrom);
-  return { mode: cfg.mode, relayed };
+  if (cfg.mode === 'cloud') return { mode: 'cloud', relayed: await relayViaCloud(cfg, raw, rcpts) };
+  if (cfg.mode === 'ses') {
+    await relayViaSes(cfg, raw, rcpts, mailfrom);
+    return { mode: 'ses', relayed: rcpts.length };
+  }
+  return { mode: cfg.mode, relayed: await relayViaSmtp(cfg, raw, rcpts, mailfrom) };
+}
+
+/**
+ * What to name in a failure message. A mode's endpoint is not always `host`+`port`
+ * (cloud is a URL), so callers ask instead of reconstructing it — that keeps the
+ * error text correct as modes are added.
+ */
+export function transportTarget(cfg) {
+  if (!cfg) return {};
+  if (cfg.mode === 'smtp') return { host: cfg.host, port: cfg.port };
+  if (cfg.mode === 'ses') return { host: cfg.host };
+  return {};
 }

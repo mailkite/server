@@ -9,14 +9,15 @@
 // Unset SMARTHOST → external recipients are skipped and logged.
 //
 // Env: HMAC_SECRET (required), PORT (8787), HOST (127.0.0.1), DATA_DIR (./data),
-//      SMARTHOST (cloud | smtp[s]://user:pass@host:port), MAILKITE_SEND_KEY
+//      SMARTHOST (cloud | ses | ses://<region> | smtp[s]://user:pass@host:port),
+//      MAILKITE_SEND_KEY, SES_* (see lib/ses.mjs)
 
 import { createServer } from 'node:http';
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { hostname } from 'node:os';
 import { Store } from './lib/db.mjs';
 import { headers, firstAddress, subject, textBody, htmlBody } from './lib/rfc822.mjs';
-import { buildMessage, parseSmarthost, relayExternal, sendViaSmtp } from './lib/smarthost.mjs';
+import { buildMessage, parseSmarthost, relayExternal, sendViaSmtp, transportTarget } from './lib/smarthost.mjs';
 import {
   authorizeUrl, codeMatches, fetchOauthEmail, hashCode, isEmailMethod, isOauthMethod,
   cloudSendingDomains, newCode, newState, publicSettings, sendSetupCode, smtpCfg,
@@ -1044,7 +1045,7 @@ Object.assign(routes, {
     const external = rcpts.filter((r) => store.userForDomain(r.split('@')[1] || '') == null);
     if (external.length && !SMARTHOST) {
       return json(res, 400, {
-        error: `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud or smtp://…) to send beyond the domains it hosts.`,
+        error: `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud, ses, or smtp://…) to send beyond the domains it hosts.`,
         code: 'no_smarthost',
         external,
       });
@@ -1063,7 +1064,7 @@ Object.assign(routes, {
     try {
       out = await deliverOutbound({ userId, raw: message, meta: metaFrom(message), rcpts });
     } catch (e) {
-      const reason = transportError(e.cause ?? e, SMARTHOST?.mode === 'smtp' ? { host: SMARTHOST.host, port: SMARTHOST.port } : {});
+      const reason = transportError(e.cause ?? e, transportTarget(SMARTHOST));
       return json(res, 502, { ...reason, stored: true, localDelivered: e.localDelivered ?? 0 });
     }
     console.log(`compose: sent ${messageId} to ${rcpts.length} recipient(s)`);
@@ -1227,7 +1228,7 @@ async function sendV1Message(userId, body) {
   const external = rcpts.filter((r) => store.userForDomain(r.split('@')[1] || '') == null);
   if (external.length && !SMARTHOST) {
     return sendFailure(400,
-      `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud or smtp://…) to send beyond the domains it hosts.`,
+      `This server has no outbound path, so it can't reach ${external.join(', ')}. Set SMARTHOST (cloud, ses, or smtp://…) to send beyond the domains it hosts.`,
       'no_smarthost', { external });
   }
 
@@ -1245,7 +1246,7 @@ async function sendV1Message(userId, body) {
     console.log(`v1/send: sent ${messageId} to ${rcpts.length} recipient(s)`);
     return { status: 202, body: { id: out.sentPublicId, status: 'sent' } };
   } catch (e) {
-    const reason = transportError(e.cause ?? e, SMARTHOST?.mode === 'smtp' ? { host: SMARTHOST.host, port: SMARTHOST.port } : {});
+    const reason = transportError(e.cause ?? e, transportTarget(SMARTHOST));
     return sendFailure(502, reason.error, reason.code || 'send_failed');
   }
 }

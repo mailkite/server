@@ -23,8 +23,9 @@ a human, because a template can only be created from a Railway workspace.
    | `HMAC_SECRET` | `${{secret(64, "abcdef0123456789")}}` | required; signs backend ↔ edge calls |
    | `HOST` | `0.0.0.0` | the image default; keep explicit |
    | `DATA_DIR` | `/data` | must match the volume mount |
-   | `SMARTHOST` | *(optional)* `cloud` or `smtp://user:pass@host:587` | without it, external recipients are skipped and logged |
+   | `SMARTHOST` | *(optional)* `cloud`, `ses`, or `smtp://user:pass@host:587` | without it, external recipients are skipped and logged |
    | `MAILKITE_SEND_KEY` | *(optional)* `mk_live_…` | required when `SMARTHOST=cloud` |
+   | `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY` | *(optional)* AWS key pair | required when `SMARTHOST=ses` (add `SES_REGION` if not `us-east-1`) |
    | `ADMIN_EMAIL` | *(optional)* | pins the admin instead of first-email-claims |
 
 4. **Attach a volume** mounted at **`/data`**. The SQLite database and message blobs live there;
@@ -52,7 +53,8 @@ dependencies at runtime.
 > routes that can forward mail, POST it to your URL, or hand it to an AI agent with your own key, and
 > a web console for domains, messages, routes, and credentials — all stored on your Railway volume.
 >
-> Outbound goes through MailKite Cloud (`SMARTHOST=cloud` + a free API key) or any SMTP relay. The
+> Outbound goes through MailKite Cloud (`SMARTHOST=cloud` + a free API key), Amazon SES
+> (`SMARTHOST=ses` + an AWS access key pair), or any SMTP relay. The
 > SMTP and IMAP edges need port 25, which Railway does not provide; run them on a VPS or Fly.io and
 > point them at this backend — one MX can serve several backends, so a shared edge works too.
 
@@ -62,7 +64,8 @@ dependencies at runtime.
 
 1. Open the generated domain. **The first email entered claims the install** — that becomes the admin.
 2. The console asks for the `HMAC_SECRET` on its Connect screen; copy it from Railway → Variables.
-3. Set `SMARTHOST` + `MAILKITE_SEND_KEY` to send, or leave them unset to receive/route only.
+3. Set `SMARTHOST` + its credential (`MAILKITE_SEND_KEY` for `cloud`, `SES_ACCESS_KEY_ID`
+   / `SES_SECRET_ACCESS_KEY` for `ses`) to send, or leave them unset to receive/route only.
 4. Point an edge's `MAILKITE_API_URL` at this domain with the same secret to deliver inbound mail.
 
 ## Verification before publishing

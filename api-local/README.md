@@ -95,12 +95,14 @@ Env vars pre-configure an install: `MAILKITE_SEND_KEY` (or `OAUTH_PROVIDER` +
 
 ### Details (magic link)
 
-**Sign-in mode depends on whether this server can send mail:**
+**Sign-in mode depends on whether the console has a proven way to send mail**
+(`MAILKITE_SEND_KEY`, OAuth env, or an email method saved in setup — *not* the outbound
+smarthost, which only carries your app's mail):
 
-| `SMARTHOST` / `MAILKITE_SEND_KEY` | Sign-in |
+| Console mail channel | Sign-in |
 |---|---|
-| neither set | An admin email **signs in directly** — no link, no log-digging. Knowing the admin address is the credential (the server has no way to verify it by mail). Per-IP rate limiting still applies. |
-| either set | Magic link: the admin gets a single-use link (15 min) by email; only clicking it creates a session. |
+| none configured | An admin email **signs in directly** — no link, no log-digging. Knowing the admin address is the credential (the server has no way to verify it by mail). Per-IP rate limiting still applies. |
+| configured | Magic link: the admin gets a single-use link (15 min) by email; only clicking it creates a session. |
 
 Configure a mail channel before exposing an install to the internet if you want link
 verification. Admin identity itself is anchored by `ADMIN_EMAIL` (or the first-visitor
@@ -184,11 +186,13 @@ think hardest about before self-hosting.
 |---|---|
 | *(unset)* | External recipients are skipped and logged. Local delivery + IMAP still work. |
 | `cloud` | Forwards the raw message to MailKite Cloud's `/api/relay` with `MAILKITE_SEND_KEY` as Bearer. |
+| `ses` · `ses://<region>` | Sends through **Amazon SES** `SendRawEmail`, signed with an ordinary AWS access key pair — no SMTP credentials to derive. |
 | `smtp://user:pass@host:587` | Relays to any SMTP smarthost — EHLO → STARTTLS → AUTH PLAIN/LOGIN → DATA. |
 | `smtps://user:pass@host:465` | Same, implicit TLS. |
 
 ```sh
 SMARTHOST=cloud MAILKITE_SEND_KEY=mk_live_… node server.mjs
+SMARTHOST=ses SES_ACCESS_KEY_ID=AKIA… SES_SECRET_ACCESS_KEY=… node server.mjs
 SMARTHOST=smtp://apikey:mk_live_…@smtp.mailkite.dev:587 node server.mjs
 ```
 
@@ -204,6 +208,47 @@ so a retry can duplicate it; that's the deliberate trade against losing the mess
 
 Credentials in a URL land in `ps` output and shell history; prefer an env file
 (`EnvironmentFile=` in systemd, `env_file:` in compose).
+
+### Amazon SES by API key
+
+`SMARTHOST=ses` calls SES's `SendRawEmail` API with SigV4, so the credential is the
+**access key pair** you already have — not the derived SMTP username/password SES makes you
+generate for its SMTP endpoint. `SES_ACCESS_KEY_ID` / `SES_SECRET_ACCESS_KEY` are read
+first; the standard `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` work as a fallback, and
+`SES_SESSION_TOKEN` / `AWS_SESSION_TOKEN` is included when you use temporary credentials.
+Region comes from `ses://<region>`, else `SES_REGION`, `AWS_REGION`, `AWS_DEFAULT_REGION`,
+else `us-east-1`.
+
+SES owns the deliverability work the smarthost exists for, so three things are still on
+you:
+
+- **Verify the From domain (or address) in SES and enable Easy DKIM.** api-local does not
+  DKIM-sign; a domain without Easy DKIM sends unsigned or under `d=amazonses.com`, which
+  fails alignment at the receiver.
+- **Leave the SES sandbox**, or only verified recipients receive mail.
+- **Grant `ses:SendRawEmail`** to the IAM user behind the key pair and nothing more:
+
+  ```json
+  { "Version": "2012-10-17", "Statement": [{
+      "Effect": "Allow", "Action": "ses:SendRawEmail", "Resource": "*" }] }
+  ```
+
+`Source` is the envelope sender (the message's `From:`), exactly as SMTP `MAIL FROM` would
+be, so it has to be a verified identity — forwards of someone else's mail will be refused
+by SES for the same reason they are refused over SES SMTP. `Destinations` is the envelope,
+so Bcc stays blind. SES caps a `SendRawEmail` message at **10 MB**, the same ceiling as its
+SMTP endpoint.
+
+SES errors are reported by their own codes rather than an SMTP reply: a verified-identity
+problem comes back `ses_rejected`, a bad key pair `ses_credentials`, throttling
+`rate_limited`, and a paused account `ses_paused` — each with the SES message attached as
+`detail`. `MAILKITE_SES_ENDPOINT` overrides the regional endpoint (tests, or an
+AWS-compatible gateway). See [`docs/ses-outbound.md`](../docs/ses-outbound.md) for the
+design and failure table.
+
+This adapter carries **your app's mail only**. Console sign-in still uses the email method
+saved in setup (or `MAILKITE_SEND_KEY` / OAuth env) — setting `SMARTHOST=ses` does not by
+itself switch the console to magic links.
 
 ## Inbound webhooks
 

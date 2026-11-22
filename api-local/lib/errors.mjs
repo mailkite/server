@@ -56,23 +56,74 @@ export function cloudSendError(status, body = '') {
   return { code: 'send_failed', error: `The send API refused the request (${status}).`, detail: trim(body) };
 }
 
+// SES answers with its own error taxonomy, not a status code: the HTTP status is often
+// 400 for everything, and the actionable part is `<Error><Code>`. These map the codes
+// worth naming; the rest fall through with SES's own message attached.
+const SES = {
+  MessageRejected: {
+    code: 'ses_rejected',
+    error: 'Amazon SES rejected the message. The From domain must be a verified identity in that AWS account — and while the account is in the SES sandbox, the recipient must be verified too.',
+  },
+  AccessDenied: {
+    code: 'ses_credentials',
+    error: 'Amazon SES denied those credentials. The IAM user needs ses:SendRawEmail, and its AWS account must own the verified From identity.',
+  },
+  InvalidClientTokenId: {
+    code: 'ses_credentials',
+    error: 'Amazon SES did not recognise that access key. Check SES_ACCESS_KEY_ID / SES_SECRET_ACCESS_KEY.',
+  },
+  SignatureDoesNotMatch: {
+    code: 'ses_credentials',
+    error: 'Amazon SES rejected the request signature — the secret key does not match the access key.',
+  },
+  UnrecognizedClientException: {
+    code: 'ses_credentials',
+    error: 'Amazon SES did not recognise the credentials or session token in this request. Check the key pair, and refresh SES_SESSION_TOKEN if you use one.',
+  },
+  ExpiredToken: {
+    code: 'ses_credentials',
+    error: 'The AWS session token has expired. Refresh SES_SESSION_TOKEN (or use a long-lived key pair).',
+  },
+  Throttling: {
+    code: 'rate_limited',
+    error: 'Amazon SES is rate-limiting this account. Wait a moment and try again.',
+  },
+  TooManyRequestsException: {
+    code: 'rate_limited',
+    error: 'Amazon SES is rate-limiting this account. Wait a moment and try again.',
+  },
+  AccountSendingPausedException: {
+    code: 'ses_paused',
+    error: 'Amazon SES has paused sending for this account, usually after too many bounces or complaints. Check the SES console before retrying.',
+  },
+};
+
 /** Map a network/SMTP-level exception to something actionable. */
 export function transportError(e, { host, port } = {}) {
   const msg = String(e?.message || e);
-  const where = host ? `${host}:${port ?? 587}` : 'the send API';
+  const where = host ? (port ? `${host}:${port}` : host) : 'the send API';
   const errno = e?.code || '';
 
   if (errno === 'ECONNREFUSED') {
-    return { code: 'connect_refused', error: `Nothing accepted a connection at ${where}. Check the host and port.`, detail: msg };
+    return { code: 'connect_refused', error: `Nothing accepted a connection at ${where}. Check the endpoint.`, detail: msg };
   }
   if (errno === 'ENOTFOUND' || errno === 'EAI_AGAIN') {
     return { code: 'dns', error: `Couldn't resolve ${host || 'the send host'}. Check the hostname and this server's DNS.`, detail: msg };
   }
   if (errno === 'ETIMEDOUT' || /timed? ?out/i.test(msg)) {
-    return { code: 'timeout', error: `Timed out connecting to ${where}. A firewall may be blocking outbound mail on that port.`, detail: msg };
+    return { code: 'timeout', error: `Timed out connecting to ${where}. A firewall may be blocking the connection.`, detail: msg };
   }
   if (/certificate|self[- ]signed|CERT_|TLS/i.test(msg)) {
     return { code: 'tls', error: `The TLS handshake with ${where} failed — its certificate wasn't accepted.`, detail: msg };
+  }
+  // SES already answered, so this is never a connectivity problem — say what it said.
+  if (e?.sesCode) {
+    const hit = SES[e.sesCode];
+    if (hit) return { ...hit, detail: msg };
+    if (Number(e.status) >= 500) {
+      return { code: 'provider_down', error: `Amazon SES returned an error (${e.status}). This is upstream — try again shortly.`, detail: msg };
+    }
+    return { code: 'ses_failed', error: `Amazon SES refused the send (${e.status || 'no status'}).`, detail: msg };
   }
   // SMTP replies the client surfaces verbatim: 535 auth, 550/553 sender refused, 4xx busy.
   const smtp = msg.match(/\b([45]\d\d)\b/);
